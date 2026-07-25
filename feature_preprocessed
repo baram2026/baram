@@ -927,8 +927,7 @@ def preprocess_weather(
     # 4단계: 불필요 컬럼 삭제
     # -----------------------------------------------------
     result = result.drop(
-        columns=config["drop_cols"],
-        errors="ignore"
+        columns=config["drop_cols"]
     )
 
     # -----------------------------------------------------

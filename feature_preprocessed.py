@@ -37,23 +37,15 @@ WEATHER_CONFIG = {
                 "ldaps_5m_blws"
             ),
             (
-                "heightAboveGround_50_50MUmax",
-                "heightAboveGround_50_50MVmax",
-                "ldaps_50m_max"
-            ),
-            (
-                "heightAboveGround_50_50MUmin",
-                "heightAboveGround_50_50MVmin",
-                "ldaps_50m_min"
+                "ldaps_50m_mean_u",
+                "ldaps_50m_mean_v",
+                "ldaps_50m_mean"
             )
         ],
         "wind_feature_prefixes": [
             "ldaps_10m",
-            "ldaps_5m_blws",
-            "ldaps_50m_max",
-            "ldaps_50m_min",
             "ldaps_50m_mean"
-        ],
+        ],# 5m BLWS는 wind_pairs에는 유지하지만 wind_feature에서는 삭제
         "shear": {
             "lower_speed_col": "ldaps_10m_wind_speed",
             "upper_speed_col": "ldaps_50m_mean_wind_speed",
@@ -71,8 +63,13 @@ WEATHER_CONFIG = {
         "drop_cols": [
             "surface_0_lsm",
             "surface_0_h",
-            "data_available_kst_dtm"
-        ]
+            "data_available_kst_dtm",
+            "ldaps_50m_mean_u",# LDAPS 50m 평균 계산용 임시 U/V이므로 삭제
+            "ldaps_50m_mean_v",
+            "ldaps_10m_wind_direction_deg",
+            "ldaps_5m_blws_wind_direction_deg",
+            "ldaps_50m_mean_wind_direction_deg"
+        ]# degree 풍향은 veer 계산 후 삭제
     },
 
     "gfs": {
@@ -130,10 +127,10 @@ WEATHER_CONFIG = {
         ],
         "shear": {
             "lower_speed_col": "gfs_10m_wind_speed",
-            "upper_speed_col": "gfs_80m_wind_speed",
+            "upper_speed_col": "gfs_100m_wind_speed",
             "lower_height": 10.0,
-            "upper_height": 80.0,
-            "output_col": "gfs_shear_alpha_10m_80m"
+            "upper_height": 100.0,
+            "output_col": "gfs_shear_alpha_10m_100m"
         },
         "veer": {
             "lower_direction_col": "gfs_10m_wind_direction_deg",
@@ -143,10 +140,14 @@ WEATHER_CONFIG = {
             "output_col": "gfs_veer_100m_10m_deg"
         },
         "drop_cols": [
-            "surface_0_lsm",
-            "surface_0_h",
-            "data_available_kst_dtm"
-        ]
+            "data_available_kst_dtm",
+            "gfs_10m_wind_direction_deg",
+            "gfs_80m_wind_direction_deg",
+            "gfs_100m_wind_direction_deg",
+            "gfs_pbl_wind_direction_deg",
+            "gfs_850hpa_wind_direction_deg",
+            "gfs_700hpa_wind_direction_deg"
+        ]#degree 풍향은 veer 계산 후 삭제
     }
 }
 
@@ -157,7 +158,6 @@ GROUP_CAPACITY_KWH = {
     "kpx_group_3": 21000.0
 }
 
-TARGET_COLS = list(GROUP_CAPACITY_KWH)
 
 GLOBAL_TIME_FEATURES = [
     "month",
@@ -185,7 +185,7 @@ def calculate_uv_direction(
     u = np.asarray(u, dtype="float64")
     v = np.asarray(v, dtype="float64")
 
-    wind_speed = np.hypot(u, v)
+    wind_speed = np.hypot(u, v) 
 
     wind_direction_deg = (
         np.degrees(np.arctan2(-u, -v))
@@ -275,12 +275,16 @@ def calculate_shear_alpha(
     lower_speed,
     upper_height,
     lower_height,
-    epsilon=1e-6
+    epsilon=1e-6,
+    low_speed_threshold=0.3 # shear 저풍속 처리
 ):
     """
     alpha =
         ln((v_upper + epsilon) / (v_lower + epsilon))
         / ln(z_upper / z_lower)
+
+    상층 또는 하층 풍속이 0.3 m/s보다 작으면
+    저풍속 구간의 불안정한 shear를 0으로 처리합니다.
     """
 
     upper_speed = pd.to_numeric(
@@ -293,12 +297,22 @@ def calculate_shear_alpha(
         errors="coerce"
     )
 
-    return (
+    shear_alpha = (
         np.log(
             (upper_speed + epsilon)
             / (lower_speed + epsilon)
         )
         / np.log(upper_height / lower_height)
+    )
+
+    low_speed_mask = (
+        (upper_speed < low_speed_threshold)
+        | (lower_speed < low_speed_threshold)
+    )
+
+    return shear_alpha.mask(
+        low_speed_mask,
+        0.0
     )
 
 
@@ -330,7 +344,7 @@ def calculate_signed_veer(
     ) - 180.0
 
 
-def add_speed_direction_interactions(
+def add_speed_direction_interactions( #풍향x풍속 함수 정의부는 그대로 두되, 아래 호출부 삭제
     df,
     wind_prefixes
 ):
@@ -442,14 +456,15 @@ def preprocess_train_labels(
 
     return result
 
-
 # =========================================================
-# 3. 보간 및 Train fallback 통계치 함수
+# 3. 이상치 처리, 보간 및 Train fallback 통계치 함수
 # =========================================================
 def get_weather_value_columns(df, source):
     """
     시간·격자 키를 제외한 기상값 컬럼을 반환합니다.
     """
+
+    source = source.lower()
 
     if source not in WEATHER_CONFIG:
         raise ValueError(
@@ -470,6 +485,80 @@ def get_weather_value_columns(df, source):
     ]
 
 
+def replace_weather_outliers_with_nan(
+    df,
+    source
+):
+    """
+    물리적으로 유효하지 않은 값을 NaN으로 변환합니다.
+
+    현재 WEATHER_CONFIG에 정의된 기준:
+    - 상대습도: 0~100 범위 밖 → NaN
+    - 음수가 불가능한 변수: 0 미만 → NaN
+    - 양의 무한대, 음의 무한대 → NaN
+
+    이 함수에서는 clip하지 않습니다.
+    이상치를 NaN으로 만든 뒤 보간할 수 있도록 처리합니다.
+    """
+
+    source = source.lower()
+
+    if source not in WEATHER_CONFIG:
+        raise ValueError(
+            f"알 수 없는 source입니다: {source}"
+        )
+
+    config = WEATHER_CONFIG[source]
+    result = df.copy()
+
+    value_cols = get_weather_value_columns(
+        result,
+        source
+    )
+
+    # 기상값을 숫자형으로 변환하고
+    # inf와 -inf도 결측치로 처리
+    for col in value_cols:
+        result[col] = (
+            pd.to_numeric(
+                result[col],
+                errors="coerce"
+            )
+            .replace(
+                [np.inf, -np.inf],
+                np.nan
+            )
+        )
+
+    # 상대습도는 0~100 범위 밖을 NaN 처리
+    for col in config["humidity_cols"]:
+        if col in result.columns:
+            invalid_mask = (
+                (result[col] < 0)
+                | (result[col] > 100)
+            )
+
+            result.loc[
+                invalid_mask,
+                col
+            ] = np.nan
+
+    # 물리적으로 음수가 불가능한 변수는
+    # 0 미만 값을 NaN 처리
+    for col in config["nonnegative_cols"]:
+        if col in result.columns:
+            invalid_mask = (
+                result[col] < 0
+            )
+
+            result.loc[
+                invalid_mask,
+                col
+            ] = np.nan
+
+    return result
+
+
 def calculate_train_fallbacks(
     train_df,
     source
@@ -477,28 +566,24 @@ def calculate_train_fallbacks(
     """
     보간 후에도 남는 결측치에 사용할 중앙값을
     Train에서만 계산합니다.
+
+    이상치는 먼저 NaN으로 바꾼 후 제외하므로,
+    정상 범위의 Train 값만 중앙값 계산에 사용됩니다.
     """
 
     source = source.lower()
-    config = WEATHER_CONFIG[source]
-    temp = train_df.copy()
 
-    for col in config["humidity_cols"]:
-        if col in temp.columns:
-            temp[col] = pd.to_numeric(
-                temp[col],
-                errors="coerce"
-            ).clip(
-                lower=0,
-                upper=100
-            )
+    if source not in WEATHER_CONFIG:
+        raise ValueError(
+            f"알 수 없는 source입니다: {source}"
+        )
 
-    for col in config["nonnegative_cols"]:
-        if col in temp.columns:
-            temp[col] = pd.to_numeric(
-                temp[col],
-                errors="coerce"
-            ).clip(lower=0)
+    # 이상치를 경계값으로 clip하지 않고
+    # NaN으로 변환한 상태에서 fallback 계산
+    temp = replace_weather_outliers_with_nan(
+        df=train_df,
+        source=source
+    )
 
     fallback_values = {}
 
@@ -525,12 +610,22 @@ def interpolate_missing_by_forecast_cycle(
     fallback_values=None
 ):
     """
-    동일한 grid_id 및 data_available_kst_dtm 안에서
-    forecast_kst_dtm 순으로 선형 보간합니다.
+    처리 순서
+    1. 물리적 이상치와 무한대를 NaN으로 변환
+    2. 동일한 grid_id 및 data_available_kst_dtm 안에서
+       forecast_kst_dtm 순으로 선형 보간
+    3. 보간 후에도 남는 NaN은 Train에서 계산한
+       fallback 중앙값으로 대체
 
-    보간 후에도 남는 결측치는 Train에서 계산한
-    fallback_values로 채웁니다.
+    최종 clip은 preprocess_weather()에서 수행합니다.
     """
+
+    source = source.lower()
+
+    if source not in WEATHER_CONFIG:
+        raise ValueError(
+            f"알 수 없는 source입니다: {source}"
+        )
 
     result = df.copy()
 
@@ -562,20 +657,23 @@ def interpolate_missing_by_forecast_cycle(
         errors="raise"
     )
 
+    # 전처리 후 원래 행 순서를 복원하기 위한 임시 컬럼
     result["__original_order"] = np.arange(
         len(result)
+    )
+
+    # -----------------------------------------------------
+    # 1단계: 이상치와 무한대를 NaN으로 변환
+    # -----------------------------------------------------
+    result = replace_weather_outliers_with_nan(
+        df=result,
+        source=source
     )
 
     value_cols = get_weather_value_columns(
         result,
         source
     )
-
-    for col in value_cols:
-        result[col] = pd.to_numeric(
-            result[col],
-            errors="coerce"
-        )
 
     cols_with_missing = [
         col
@@ -589,8 +687,11 @@ def interpolate_missing_by_forecast_cycle(
             "data_available_kst_dtm"
         ]
 
+        # 같은 예보 주기 및 격자 안에서
+        # forecast 시각 순으로 보간하기 위해 정렬
         result = result.sort_values(
-            group_cols + ["forecast_kst_dtm"]
+            group_cols
+            + ["forecast_kst_dtm"]
         )
 
         grouped = result.groupby(
@@ -599,6 +700,9 @@ def interpolate_missing_by_forecast_cycle(
             observed=True
         )
 
+        # -------------------------------------------------
+        # 2단계: 예보 주기 내부 선형 보간
+        # -------------------------------------------------
         for col in cols_with_missing:
             result[col] = grouped[col].transform(
                 lambda series: series.interpolate(
@@ -607,6 +711,10 @@ def interpolate_missing_by_forecast_cycle(
                 )
             )
 
+        # -------------------------------------------------
+        # 3단계: 보간 후 남은 NaN을
+        #         Train 중앙값으로 대체
+        # -------------------------------------------------
         if fallback_values is not None:
             for col in cols_with_missing:
                 if col in fallback_values:
@@ -614,6 +722,7 @@ def interpolate_missing_by_forecast_cycle(
                         fallback_values[col]
                     )
 
+        # 원래 행 순서 복원
         result = result.sort_values(
             "__original_order"
         )
@@ -623,7 +732,6 @@ def interpolate_missing_by_forecast_cycle(
     )
 
     return result
-
 
 # =========================================================
 # 4. Train/Test 공통 기상 전처리 함수
@@ -666,7 +774,7 @@ def preprocess_weather(
     )
 
     # -----------------------------------------------------
-    # 2단계: 물리적 범위 보정
+    # 2단계: 보간 후 최종 물리적 범위 보정
     # -----------------------------------------------------
     for col in config["humidity_cols"]:
         if col in result.columns:
@@ -688,6 +796,54 @@ def preprocess_weather(
     # -----------------------------------------------------
     # 3단계: U, V 기반 풍속·풍향 피처
     # -----------------------------------------------------
+    if source == "ldaps":
+        u50_max = pd.to_numeric(
+            result[
+                "heightAboveGround_50_50MUmax"
+            ],
+            errors="coerce"
+        )
+
+        u50_min = pd.to_numeric(
+            result[
+                "heightAboveGround_50_50MUmin"
+            ],
+            errors="coerce"
+        )
+
+        v50_max = pd.to_numeric(
+            result[
+                "heightAboveGround_50_50MVmax"
+            ],
+            errors="coerce"
+        )
+
+        v50_min = pd.to_numeric(
+            result[
+                "heightAboveGround_50_50MVmin"
+            ],
+            errors="coerce"
+        )
+
+        # U/V 성분을 각각 산술평균한 뒤,
+        # 다른 풍속과 동일하게 hypot(U, V)로 평균 풍속 계산(hypot은 calculate_uv_direction함수에 있음)
+        result["ldaps_50m_mean_u"] = (
+            u50_max + u50_min
+        ) / 2.0
+
+        result["ldaps_50m_mean_v"] = (
+            v50_max + v50_min
+        ) / 2.0
+
+        # 50m U/V 성분의 max-min 범위 피처
+        result["ldaps_50m_u_max_minus_min"] = (
+            u50_max - u50_min
+        )
+
+        result["ldaps_50m_v_max_minus_min"] = (
+            v50_max - v50_min
+        )
+
     for u_col, v_col, prefix in config["wind_pairs"]:
         result = add_uv_wind_features(
             df=result,
@@ -695,12 +851,6 @@ def preprocess_weather(
             v_col=v_col,
             prefix=prefix
         )
-
-    if source == "ldaps":
-        result["ldaps_50m_mean_wind_speed"] = (
-            result["ldaps_50m_max_wind_speed"]
-            + result["ldaps_50m_min_wind_speed"]
-        ) / 2.0
 
     # -----------------------------------------------------
     # 3.5-1단계: 시간 주기성 피처
@@ -770,67 +920,7 @@ def preprocess_weather(
     )
 
     # -----------------------------------------------------
-    # 3.5-3단계: LDAPS 50m 평균 풍향
-    # -----------------------------------------------------
-    if source == "ldaps":
-        u50_mean = (
-            pd.to_numeric(
-                result[
-                    "heightAboveGround_50_50MUmax"
-                ],
-                errors="coerce"
-            )
-            + pd.to_numeric(
-                result[
-                    "heightAboveGround_50_50MUmin"
-                ],
-                errors="coerce"
-            )
-        ) / 2.0
-
-        v50_mean = (
-            pd.to_numeric(
-                result[
-                    "heightAboveGround_50_50MVmax"
-                ],
-                errors="coerce"
-            )
-            + pd.to_numeric(
-                result[
-                    "heightAboveGround_50_50MVmin"
-                ],
-                errors="coerce"
-            )
-        ) / 2.0
-
-        (
-            _,
-            mean_direction_deg,
-            mean_dir_sin,
-            mean_dir_cos
-        ) = calculate_uv_direction(
-            u=u50_mean.to_numpy(
-                dtype="float64"
-            ),
-            v=v50_mean.to_numpy(
-                dtype="float64"
-            )
-        )
-
-        result[
-            "ldaps_50m_mean_wind_direction_deg"
-        ] = mean_direction_deg
-
-        result[
-            "ldaps_50m_mean_dir_sin"
-        ] = mean_dir_sin
-
-        result[
-            "ldaps_50m_mean_dir_cos"
-        ] = mean_dir_cos
-
-    # -----------------------------------------------------
-    # 3.5-4단계: Wind Shear Alpha
+    # 3.5-3단계: Wind Shear Alpha
     # -----------------------------------------------------
     shear_config = config["shear"]
 
@@ -853,7 +943,7 @@ def preprocess_weather(
     )
 
     # -----------------------------------------------------
-    # 3.5-5단계: 야간 플래그
+    # 3.5-4단계: 야간 플래그
     # -----------------------------------------------------
     shortwave_radiation = pd.to_numeric(
         result[config["shortwave_col"]],
@@ -865,19 +955,9 @@ def preprocess_weather(
     ).astype("int8")
 
     # -----------------------------------------------------
-    # 3.5-6단계: 풍속×풍향 상호작용
+    # 3.5-5단계: 야간 풍속 상호작용
     # -----------------------------------------------------
-    result = add_speed_direction_interactions(
-        df=result,
-        wind_prefixes=config[
-            "wind_feature_prefixes"
-        ]
-    )
-
-    # -----------------------------------------------------
-    # 3.5-7단계: 야간 풍속 상호작용
-    # -----------------------------------------------------
-    result = add_night_speed_interactions(
+    result = add_night_speed_interactions( #LDAPS wind feature에서 경계층 5m 바람 삭제했으므로 
         df=result,
         night_flag_col=config[
             "night_flag_col"
@@ -888,7 +968,7 @@ def preprocess_weather(
     )
 
     # -----------------------------------------------------
-    # 3.5-8단계: Veer
+    # 3.5-6단계: Veer
     # -----------------------------------------------------
     veer_config = config["veer"]
 
@@ -927,7 +1007,8 @@ def preprocess_weather(
     # 4단계: 불필요 컬럼 삭제
     # -----------------------------------------------------
     result = result.drop(
-        columns=config["drop_cols"]
+        columns=config["drop_cols"],
+        errors="ignore"
     )
 
     # -----------------------------------------------------
@@ -996,7 +1077,7 @@ GROUP_TARGET_COLS = {
 GRID_METADATA_COLS = {
     "latitude",
     "longitude"
-}
+}#여기에서 latitude, longitude 포함됨
 
 
 def normalize_grid_id(grid_series):
@@ -1037,7 +1118,7 @@ def get_pivot_weather_columns(df):
     exclude_cols = {
         "forecast_kst_dtm",
         "grid_id",
-        *GRID_METADATA_COLS,
+        *GRID_METADATA_COLS,#GRID_METADATA_COLS 언패킹
         *GLOBAL_TIME_FEATURES
     }
 
@@ -1603,6 +1684,9 @@ def build_group_dataset(
 
     Test:
         그룹 관련 LDAPS Wide + GFS grid 5
+
+    Group 3 Train:
+        kpx_group_3 Label이 제공되지 않는 2022년 행은 제외합니다.
     """
 
     if group_id not in GROUP_TARGET_COLS:
@@ -1627,6 +1711,12 @@ def build_group_dataset(
         on="forecast_kst_dtm",
         how="inner",
         validate="one_to_one"
+    )
+
+    # 그룹별 LDAPS 격자와 공통 GFS 풍속의 이동평균 추가
+    group_df = add_wind_rolling_features(
+        df=group_df,
+        grid_ids=LDAPS_GROUP_GRIDS[group_id]
     )
 
     # Test처럼 Label이 없는 경우 기상 피처만 반환
@@ -1656,6 +1746,30 @@ def build_group_dataset(
         validate="one_to_one"
     )
 
+    # -----------------------------------------------------
+    # Group 3 Train의 2022년 Label 결측 행 제외
+    # 해당 시각의 LDAPS·GFS 피처도 행 단위로 함께 제외됨
+    # -----------------------------------------------------
+    if group_id == 3:
+        before_count = len(final_group_df)
+
+        final_group_df = (
+            final_group_df[
+                final_group_df[target_col].notna()
+            ]
+            .copy()
+            .reset_index(drop=True)
+        )
+
+        removed_count = (
+            before_count - len(final_group_df)
+        )
+
+        print(
+            f"Group 3 Label 결측 행 제외: "
+            f"{removed_count:,}행"
+        )
+
     # Target을 마지막 컬럼에 배치
     feature_cols = [
         col
@@ -1666,8 +1780,6 @@ def build_group_dataset(
     return final_group_df[
         feature_cols + [target_col]
     ]
-
-
 def process_grouped_dataset(
     split,
     input_dir,

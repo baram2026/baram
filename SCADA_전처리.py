@@ -5,6 +5,12 @@
 # 1. scada_vestas_train.csv
 # 2. scada_unison_train.csv
 # 3. ldaps_train.csv
+#
+# 생성 파일
+# - /content/preprocessed/scada_vestas_train_cleaned.csv
+# - /content/preprocessed/scada_unison_train_cleaned.csv
+# - /content/preprocessed/scada_vestas_zero_diagnostics.csv
+# - /content/preprocessed/scada_unison_zero_diagnostics.csv
 # =========================================================
 
 from pathlib import Path
@@ -29,7 +35,7 @@ PEER_ACTIVE_RATIO = 0.50          # 타 터빈 절반 이상 정상발전
 MIN_VALID_PEERS = 2               # 비교 가능한 타 터빈 최소 수
 LONG_OUTAGE_HOURS = 72            # 72시간 이상 연속 저출력
 SCADA_INTERVAL_MINUTES = 10
-SAVE_DIAGNOSTICS = True
+SAVE_DIAGNOSTICS = False # 진단파일은 생성 X 진단은 출력 결과로만 나옴
 
 
 # =========================================================
@@ -82,7 +88,14 @@ FAULT_STATUSES = {
     "개별정지_고장정비후보",
     "장기연속정지"
 }
-
+# 장기 연속 정지 여부를 검사할 수 있는 상태
+# 착빙과 저풍속은 명시적으로 제외
+LONG_OUTAGE_ELIGIBLE_STATUSES = {
+    "판정불가",
+    "판정불가_풍속결측",
+    "판정불가_기상결측",
+    "개별정지_고장정비후보"
+}
 
 # =========================================================
 # 2. 공통 파일 검증
@@ -373,15 +386,13 @@ def attach_weather(scada_long, ldaps_weather):
     # merge_asof는 on 키가 전체적으로 오름차순이어야 함
     left = left.sort_values(
         [
-            "kst_dtm",
-            "grid_id"
+            "kst_dtm"
         ]
     ).reset_index(drop=True)
 
     right = right.sort_values(
         [
-            "forecast_kst_dtm",
-            "grid_id"
+            "forecast_kst_dtm"
         ]
     ).reset_index(drop=True)
 
@@ -401,37 +412,71 @@ def attach_weather(scada_long, ldaps_weather):
 # =========================================================
 def add_long_outage_flag(df):
     """
-    발전 효율 2% 미만이 72시간 이상 연속되는 구간의
-    전체 행을 장기연속정지로 표시합니다.
+    이미 착빙이나 저풍속으로 판정된 행은 제외하고,
+    다음 상태에서만 72시간 이상 연속 여부를 검사합니다.
+
+    대상 상태:
+    - 판정불가
+    - 판정불가_풍속결측
+    - 판정불가_기상결측
+    - 개별정지_고장정비후보
+
+    해당 상태의 저출력이 72시간 이상 연속되면
+    구간 전체를 장기연속정지 후보로 표시합니다.
+
+    착빙·저풍속·정상발전·원본결측 행을 만나면
+    연속 구간이 끊어집니다.
     """
 
-    result = df.sort_values(
-        [
-            "turbine_id",
-            "kst_dtm"
-        ]
-    ).reset_index(drop=True)
+    result = (
+        df
+        .sort_values(
+            [
+                "turbine_id",
+                "kst_dtm"
+            ]
+        )
+        .reset_index(drop=True)
+        .copy()
+    )
 
     expected_gap = pd.Timedelta(
         minutes=SCADA_INTERVAL_MINUTES
     )
 
+    # -----------------------------------------------------
+    # 장기 정지 판정 대상
+    # - 저출력이어야 함
+    # - 현재 상태가 미분류 또는 고장·정비 후보여야 함
+    # -----------------------------------------------------
+    result["is_long_outage_candidate"] = (
+        result["is_low_output"]
+        & result["status"].isin(
+            LONG_OUTAGE_ELIGIBLE_STATUSES
+        )
+    )
+
+    # 같은 터빈의 바로 이전 행이
+    # 장기 정지 판정 대상이었는지 확인
     previous_state = (
         result
         .groupby(
             "turbine_id",
             sort=False
-        )["is_low_output"]
+        )["is_long_outage_candidate"]
         .shift()
     )
 
+    # 대상 여부가 달라지면 새로운 연속 구간 시작
     state_changed = (
         previous_state.isna()
-        | result["is_low_output"].ne(
-            previous_state
-        )
+        | result[
+            "is_long_outage_candidate"
+        ].ne(previous_state)
     )
 
+    # 10분 간격이 끊긴 경우에도
+    # 새로운 연속 구간으로 처리
     time_broken = (
         result
         .groupby(
@@ -442,7 +487,10 @@ def add_long_outage_flag(df):
         .ne(expected_gap)
     )
 
-    new_streak = state_changed | time_broken
+    new_streak = (
+        state_changed
+        | time_broken
+    )
 
     result["_streak_id"] = (
         new_streak
@@ -461,12 +509,12 @@ def add_long_outage_flag(df):
                 "_streak_id"
             ],
             sort=False
-        )["is_low_output"]
+        )["is_long_outage_candidate"]
         .transform("size")
     )
 
     result["low_output_streak_hours"] = np.where(
-        result["is_low_output"],
+        result["is_long_outage_candidate"],
         (
             streak_size
             * SCADA_INTERVAL_MINUTES
@@ -476,7 +524,7 @@ def add_long_outage_flag(df):
     )
 
     result["is_long_outage"] = (
-        result["is_low_output"]
+        result["is_long_outage_candidate"]
         & (
             result["low_output_streak_hours"]
             >= LONG_OUTAGE_HOURS
@@ -486,8 +534,6 @@ def add_long_outage_flag(df):
     return result.drop(
         columns="_streak_id"
     )
-
-
 # =========================================================
 # 7. 저출력 원인 분류 및 발전량 정제
 # =========================================================
@@ -816,6 +862,7 @@ def process_manufacturer(
         "is_low_output",
         "is_icing",
         "is_low_wind",
+        "is_long_outage_candidate", #
         "is_long_outage",
         "low_output_streak_hours",
         "status"

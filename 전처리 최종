@@ -781,11 +781,6 @@ def classify_and_clean(
         result["is_low_output"]
     )
 
-    # 일반 저출력은 우선 판정불가로 설정
-    result.loc[
-    candidate,
-    "status"] = "판정불가"
-
     result.loc[
         original_missing,
         "status"
@@ -930,7 +925,7 @@ def build_hourly_outage_summary(
     - group2_available_turbine_count
     - group2_fault_maintenance_flag
 
-    이 요약값은 Train Label 보정에만 사용하며,
+    이 요약값은 Group 1·2의 장기정지 행 제외에만 사용하며,
     최종 모델 입력 피처로는 남기지 않습니다.
     """
 
@@ -969,7 +964,7 @@ def build_hourly_outage_summary(
         .astype(bool)
     )
 
-    # VESTAS Group 1·2만 Label 보정에 사용
+    # VESTAS Group 1·2만 장기정지 행 제외 판단에 사용
     temp = temp[
         temp["kpx_group"].isin(
             [1, 2]
@@ -1363,7 +1358,7 @@ GLOBAL_TIME_FEATURES = [
 def calculate_uv_direction(
     u,
     v,
-    calm_threshold=1e-12
+    calm_threshold=0.3
 ):
     """
     U, V 성분으로 풍속과 기상학적 풍향을 계산합니다.
@@ -2160,7 +2155,7 @@ def preprocess_weather(
     # 3.5-6단계: Veer
     # -----------------------------------------------------
     veer_config = config["veer"]
-
+     
     veer = calculate_signed_veer(
         upper_direction=result[
             veer_config[
@@ -2173,18 +2168,18 @@ def preprocess_weather(
             ]
         ]
     )
-
+    low_speed_thershold=0.3
     # 어느 한쪽이라도 무풍이면 풍향 변화는 0으로 처리
     calm_mask = (
         (
             result[
                 veer_config["lower_speed_col"]
-            ] <= 1e-12
+            ] <= low_speed_thershold
         )
         | (
             result[
                 veer_config["upper_speed_col"]
-            ] <= 1e-12
+            ] <= low_speed_thershold
         )
     )
 
@@ -3122,78 +3117,109 @@ def process_manufacturer(
 
 
 # =========================================================
-# 2. 장기정지 터빈 수를 이용해 Train Label 비례 보정
+# 2. 최종 그룹 파일에서 SCADA 관련 열 차단
 # =========================================================
-def apply_scada_outage_correction_to_labels(
-    train_labels,
-    hourly_outage_summary,
-    upper_ratio=1.05
+FINAL_FORBIDDEN_COLUMN_TOKENS = (
+    "scada",
+    "vestas_wtg",
+    "unison_wtg",
+    "outage_turbine_count",
+    "available_turbine_count",
+    "fault_maintenance_flag",
+    "long_outage",
+    "power_clean",
+    "power_raw",
+    "peer_active"
+)
+
+
+def assert_no_scada_columns(
+    df,
+    data_name
 ):
     """
-    Group 1·2에서 장기정지 터빈이 있는 시간의 행을
-    삭제하지 않고, 가동 가능한 터빈 수에 비례하여
-    발전량 Label을 전체 6기 정상 가동 기준으로 보정합니다.
+    최종 모델 입력 파일에 SCADA 원자료나
+    장기정지 판단용 보조 열이 남아 있지 않은지 검사합니다.
 
-    보정식:
-        corrected_label
-        = original_label
-          × total_turbines
-          / available_turbines
-
-    예:
-        6기 중 1기 장기정지
-        → original_label × 6 / 5
-
-    원래부터 Target이 NaN인 행은 그대로 유지합니다.
-
-    모든 터빈이 장기정지하여 available_turbines=0인 경우에는
-    비례 보정이 불가능하므로 원래 Label을 유지하고
-    해당 행 수를 경고로 출력합니다.
-
-    장기정지 터빈 수와 가동 터빈 수는 Label 보정에만 사용하며,
-    최종 모델 입력 피처에는 남기지 않습니다.
+    최종 그룹별 Train/Test 파일은 다음으로만 구성되어야 합니다.
+    - LDAPS/GFS 및 파생 기상 피처
+    - forecast_kst_dtm
+    - Train의 해당 그룹 Target
     """
 
-    result = train_labels.copy()
-    summary = hourly_outage_summary.copy()
-
-    required_label_cols = [
-        "forecast_kst_dtm",
-        GROUP_TARGET_COLS[1],
-        GROUP_TARGET_COLS[2],
-        GROUP_TARGET_COLS[3]
-    ]
-
-    missing_label_cols = [
+    forbidden_cols = [
         col
-        for col in required_label_cols
-        if col not in result.columns
+        for col in df.columns
+        if any(
+            token in str(col).lower()
+            for token in FINAL_FORBIDDEN_COLUMN_TOKENS
+        )
     ]
 
-    if missing_label_cols:
-        raise KeyError(
-            "train_labels에 필요한 컬럼이 없습니다: "
-            f"{missing_label_cols}"
+    if forbidden_cols:
+        raise RuntimeError(
+            f"{data_name}에 SCADA 또는 장기정지 보조 열이 "
+            f"남아 있습니다: {forbidden_cols}"
         )
 
-    required_summary_cols = [
+
+# =========================================================
+# 3. 그룹별 장기정지 행 제외
+# =========================================================
+def remove_group_long_outage_rows(
+    group_df,
+    group_id,
+    hourly_outage_summary
+):
+    """
+    Group 1·2에서 해당 그룹의 장기연속정지 터빈이
+    한 대라도 존재하는 시간의 학습 행을 제외합니다.
+
+    중요:
+    - Group 1 장기정지는 Group 1 행에만 적용
+    - Group 2 장기정지는 Group 2 행에만 적용
+    - 동일 시각의 다른 그룹 행은 유지
+    - Group 3에는 VESTAS 장기정지 정보를 적용하지 않음
+    - SCADA 요약 열은 필터링 직후 삭제
+    """
+
+    result = group_df.copy()
+
+    if group_id == 3:
+        return result, 0
+
+    if group_id not in {1, 2}:
+        raise ValueError(
+            "group_id는 1, 2, 3 중 하나여야 합니다."
+        )
+
+    if hourly_outage_summary is None:
+        raise ValueError(
+            f"Train Group {group_id} 장기정지 행 제외에 "
+            "hourly_outage_summary가 필요합니다."
+        )
+
+    summary = hourly_outage_summary.copy()
+    outage_col = (
+        f"group{group_id}"
+        "_outage_turbine_count"
+    )
+
+    required_cols = [
         "forecast_kst_dtm",
-        "group1_outage_turbine_count",
-        "group1_available_turbine_count",
-        "group2_outage_turbine_count",
-        "group2_available_turbine_count"
+        outage_col
     ]
 
-    missing_summary_cols = [
+    missing_cols = [
         col
-        for col in required_summary_cols
+        for col in required_cols
         if col not in summary.columns
     ]
 
-    if missing_summary_cols:
+    if missing_cols:
         raise KeyError(
-            "시간별 장기정지 요약에 필요한 컬럼이 없습니다: "
-            f"{missing_summary_cols}"
+            f"Group {group_id} 장기정지 행 제외에 필요한 "
+            f"요약 컬럼이 없습니다: {missing_cols}"
         )
 
     result["forecast_kst_dtm"] = pd.to_datetime(
@@ -3210,245 +3236,81 @@ def apply_scada_outage_correction_to_labels(
         "forecast_kst_dtm"
     ].duplicated().any():
         raise ValueError(
-            "train_labels에 중복된 시각이 있습니다."
+            f"Group {group_id} 데이터에 중복 시각이 있습니다."
         )
 
     if summary[
         "forecast_kst_dtm"
     ].duplicated().any():
         raise ValueError(
-            "시간별 장기정지 요약에 "
-            "중복된 시각이 있습니다."
+            "시간별 장기정지 요약에 중복 시각이 있습니다."
         )
 
-    original_row_count = len(result)
-
-    # 보정 전 Label을 같은 행에 임시 보관
-    raw_target_cols = {}
-
-    for group_id in [1, 2]:
-        target_col = GROUP_TARGET_COLS[
-            group_id
-        ]
-
-        raw_col = (
-            f"__raw_{target_col}"
-        )
-
-        result[raw_col] = (
-            result[target_col]
-        )
-
-        raw_target_cols[
-            group_id
-        ] = raw_col
+    before_count = len(result)
 
     result = result.merge(
-        summary[
-            required_summary_cols
-        ],
+        summary[required_cols],
         on="forecast_kst_dtm",
         how="left",
         validate="one_to_one"
     )
 
-    if len(result) != original_row_count:
+    if len(result) != before_count:
         raise RuntimeError(
-            "SCADA 장기정지 요약 병합 중 "
-            "train_labels 행 수가 변경되었습니다."
+            f"Group {group_id} 장기정지 요약 병합 중 "
+            "행 수가 변경되었습니다."
         )
 
-    print(
-        "\n[SCADA 장기정지 터빈 수 비례 Label 보정]"
+    # SCADA와 시각이 매칭되지 않으면 장기정지 없음으로 처리
+    result[outage_col] = (
+        pd.to_numeric(
+            result[outage_col],
+            errors="coerce"
+        )
+        .fillna(0)
     )
 
-    total_turbines_by_group = {
-        1: 6,
-        2: 6
-    }
-
-    helper_cols = []
-
-    for group_id, total_turbines in (
-        total_turbines_by_group.items()
-    ):
-        target_col = GROUP_TARGET_COLS[
-            group_id
-        ]
-
-        outage_col = (
-            f"group{group_id}"
-            "_outage_turbine_count"
-        )
-
-        available_col = (
-            f"group{group_id}"
-            "_available_turbine_count"
-        )
-
-        helper_cols.extend(
-            [
-                outage_col,
-                available_col
-            ]
-        )
-
-        # SCADA와 매칭되지 않은 Label 시각은
-        # 장기정지 터빈이 없는 것으로 처리
-        result[outage_col] = (
-            result[outage_col]
-            .fillna(0)
-            .astype("int8")
-        )
-
-        result[available_col] = (
-            result[available_col]
-            .fillna(total_turbines)
-            .astype("int8")
-        )
-
-        inconsistent_count = (
-            result[outage_col]
-            + result[available_col]
-        ).ne(total_turbines)
-
-        if inconsistent_count.any():
-            raise ValueError(
-                f"Group {group_id}의 장기정지 터빈 수와 "
-                "가동 터빈 수의 합이 전체 터빈 수와 다릅니다."
-            )
-
-        invalid_count = (
-            (result[outage_col] < 0)
-            | (
-                result[outage_col]
-                > total_turbines
-            )
-            | (result[available_col] < 0)
-            | (
-                result[available_col]
-                > total_turbines
-            )
-        )
-
-        if invalid_count.any():
-            raise ValueError(
-                f"Group {group_id}의 터빈 수 정보가 "
-                "유효 범위를 벗어났습니다."
-            )
-
-        correction_mask = (
-            result[target_col].notna()
-            & (result[outage_col] > 0)
-            & (result[available_col] > 0)
-        )
-
-        corrected_values = (
-            result.loc[
-                correction_mask,
-                target_col
-            ]
-            * total_turbines
-            / result.loc[
-                correction_mask,
-                available_col
-            ]
-        )
-
-        capacity_kwh = GROUP_CAPACITY_KWH[
-            target_col
-        ]
-
-        corrected_values = (
-            corrected_values
-            .clip(
-                lower=0,
-                upper=(
-                    capacity_kwh
-                    * upper_ratio
-                )
-            )
-        )
-
-        result.loc[
-            correction_mask,
-            target_col
-        ] = corrected_values
-
-        all_outage_mask = (
-            result[target_col].notna()
-            & (
-                result[available_col]
-                == 0
-            )
-        )
-
-        # 분모가 0인 행은 비례 보정할 수 없으므로
-        # 원래 Label을 유지해 행 자체는 보존
-        raw_col = raw_target_cols[
-            group_id
-        ]
-
-        result.loc[
-            all_outage_mask,
-            target_col
-        ] = result.loc[
-            all_outage_mask,
-            raw_col
-        ]
-
-        changed_mask = (
-            correction_mask
-            & (
-                result[target_col]
-                != result[raw_col]
-            )
-        )
-
-        print(
-            f"{target_col} 비례 보정:",
-            f"{int(correction_mask.sum()):,}행"
-        )
-
-        print(
-            f"{target_col} 실제 값 변경:",
-            f"{int(changed_mask.sum()):,}행"
-        )
-
-        print(
-            f"{target_col} 전체 터빈 장기정지로 "
-            "원본 유지:",
-            f"{int(all_outage_mask.sum()):,}행"
-        )
-
-    # SCADA 기반 보조 열과 임시 원본 Label 열은
-    # 모델 입력 및 저장 결과에 남기지 않음
-    result = result.drop(
-        columns=(
-            helper_cols
-            + list(
-                raw_target_cols.values()
-            )
-        )
+    invalid_mask = (
+        (result[outage_col] < 0)
+        | (result[outage_col] > 6)
     )
 
-    if len(result) != original_row_count:
-        raise RuntimeError(
-            "Label 보정 과정에서 행 수가 변경되었습니다."
+    if invalid_mask.any():
+        raise ValueError(
+            f"Group {group_id} 장기정지 터빈 수가 "
+            "0~6 범위를 벗어났습니다."
         )
 
-    return result
+    long_outage_mask = (
+        result[outage_col] > 0
+    )
+
+    removed_count = int(
+        long_outage_mask.sum()
+    )
+
+    # 장기정지 터빈이 한 대라도 있는 해당 그룹 행만 제외
+    result = (
+        result.loc[
+            ~long_outage_mask
+        ]
+        .drop(columns=outage_col)
+        .reset_index(drop=True)
+    )
+
+    return result, removed_count
 
 
 # =========================================================
-# 3. 그룹별 최종 데이터 생성
+# 4. 그룹별 최종 데이터 생성
 # 기존 build_group_dataset()을 이 함수로 교체
 # =========================================================
 def build_group_dataset(
     ldaps_processed,
     gfs_grid5,
     group_id,
-    train_labels=None
+    train_labels=None,
+    hourly_outage_summary=None
 ):
     """
     그룹별 최종 데이터프레임을 생성합니다.
@@ -3457,15 +3319,18 @@ def build_group_dataset(
     - 그룹 관련 LDAPS Wide
     - GFS grid 5
     - 이동평균 피처
-    - Group 1·2는 장기정지 터빈 수에 따라 보정된 Target
-    - Group 3는 원래 Target
-    - 실제 Target 결측 행만 최종 Train에서 제외
-
-    장기정지로 보정된 Group 1·2 행은 Target이 유효하므로
-    삭제되지 않고 그대로 유지됩니다.
+    - 원래 Group Target
+    - Group 1·2는 장기연속정지 터빈이 한 대라도 있는
+      해당 그룹·시간 행을 삭제
+    - Group 3는 VESTAS 장기정지 정보를 적용하지 않음
+    - 원래 Target 결측 행 제외
 
     Test:
     - 기상 피처만 반환
+    - SCADA 정보를 사용하지 않음
+
+    최종 반환값에는 SCADA 원자료, 장기정지 플래그,
+    장기정지/가동 터빈 수가 포함되지 않습니다.
     """
 
     if group_id not in GROUP_TARGET_COLS:
@@ -3492,7 +3357,6 @@ def build_group_dataset(
         validate="one_to_one"
     )
 
-    # 기존 기상 코드의 이동평균 피처 유지
     group_df = add_wind_rolling_features(
         df=group_df,
         grid_ids=LDAPS_GROUP_GRIDS[
@@ -3500,8 +3364,12 @@ def build_group_dataset(
         ]
     )
 
-    # Test는 Label이 없으므로 기상 피처만 반환
+    # Test는 Label과 SCADA가 없으므로 기상 피처만 반환
     if train_labels is None:
+        assert_no_scada_columns(
+            df=group_df,
+            data_name=f"Test Group {group_id}"
+        )
         return group_df
 
     target_col = GROUP_TARGET_COLS[
@@ -3515,8 +3383,6 @@ def build_group_dataset(
         ]
     ].copy()
 
-    # Label 데이터프레임의 시각 자체는 유지되어 있으므로
-    # Target이 NaN이어도 시각 구성 비교는 가능합니다.
     assert_same_forecast_times(
         left_df=group_df,
         right_df=group_labels,
@@ -3531,21 +3397,33 @@ def build_group_dataset(
         validate="one_to_one"
     )
 
-    before_count = len(
+    # -----------------------------------------------------
+    # Group 1·2 장기연속정지 행을 그룹별로 제외
+    # -----------------------------------------------------
+    final_group_df, outage_removed_count = (
+        remove_group_long_outage_rows(
+            group_df=final_group_df,
+            group_id=group_id,
+            hourly_outage_summary=(
+                hourly_outage_summary
+            )
+        )
+    )
+
+    if group_id in {1, 2}:
+        print(
+            f"Group {group_id} 장기연속정지 행 제외:",
+            f"{outage_removed_count:,}행"
+        )
+
+    # -----------------------------------------------------
+    # 원래 Target 결측 행 제외
+    # - Group 3의 2022년 Label 결측 포함
+    # -----------------------------------------------------
+    before_target_drop = len(
         final_group_df
     )
 
-    # -----------------------------------------------------
-    # 실제 Target 결측 행만 제외
-    #
-    # Group 1·2:
-    # - 장기정지 행은 이미 터빈 수 비례 보정되어 유지
-    # - 원래부터 Target이 결측인 경우에만 제외
-    #
-    # Group 3:
-    # - Label이 없는 2022년
-    # - 기타 원래 Target 결측
-    # -----------------------------------------------------
     final_group_df = (
         final_group_df[
             final_group_df[
@@ -3556,14 +3434,14 @@ def build_group_dataset(
         .reset_index(drop=True)
     )
 
-    removed_count = (
-        before_count
+    target_missing_removed = (
+        before_target_drop
         - len(final_group_df)
     )
 
     print(
-        f"Group {group_id} Target 결측 행 제외:",
-        f"{removed_count:,}행"
+        f"Group {group_id} 원래 Target 결측 행 제외:",
+        f"{target_missing_removed:,}행"
     )
 
     # Target을 마지막 컬럼에 배치
@@ -3573,13 +3451,21 @@ def build_group_dataset(
         if col != target_col
     ]
 
-    return final_group_df[
+    final_group_df = final_group_df[
         feature_cols + [target_col]
     ]
 
+    # 최종 파일에 SCADA 관련 열이 남는 것을 명시적으로 차단
+    assert_no_scada_columns(
+        df=final_group_df,
+        data_name=f"Train Group {group_id}"
+    )
+
+    return final_group_df
+
 
 # =========================================================
-# 4. Train/Test 그룹별 처리
+# 5. Train/Test 그룹별 처리
 # 기존 process_grouped_dataset()을 이 함수로 교체
 # =========================================================
 def process_grouped_dataset(
@@ -3594,12 +3480,14 @@ def process_grouped_dataset(
     Train/Test를 동일한 기상 전처리 구조로 처리합니다.
 
     Train:
-    - Group 1·2 Label에 장기정지 터빈 수 비례 보정 적용
-    - 보정된 행은 삭제하지 않음
-    - SCADA 요약값은 모델 피처로 남기지 않음
+    - train_labels 값은 비례 보정하지 않음
+    - Group 1·2의 장기연속정지 행만 그룹별로 제외
+    - Group 3에는 VESTAS 장기정지 정보를 적용하지 않음
+    - 최종 파일에 SCADA 관련 열을 포함하지 않음
 
     Test:
     - SCADA 정보를 사용하지 않음
+    - 기상 피처만 저장
     """
 
     split = split.lower()
@@ -3619,7 +3507,6 @@ def process_grouped_dataset(
         )
     )
 
-    # GFS grid 5는 모든 그룹에서 공통 사용
     gfs_grid5 = prepare_gfs_grid5(
         gfs_processed
     )
@@ -3637,6 +3524,7 @@ def process_grouped_dataset(
             "TRAIN Label"
         )
 
+        # 하한/상한 clip만 적용하고 비례 보정은 하지 않음
         train_labels = (
             preprocess_train_labels(
                 df=read_csv_utf8(
@@ -3659,47 +3547,20 @@ def process_grouped_dataset(
                 "train_labels에 중복된 시각이 있습니다."
             )
 
-        # 장기정지 터빈이 있는 행을 삭제하지 않고,
-        # 가동 터빈 수에 비례해 Group 1·2 Label 보정
+        if hourly_outage_summary is None:
+            raise ValueError(
+                "Train Group 1·2 장기정지 행 제외에 "
+                "hourly_outage_summary가 필요합니다."
+            )
+
+    elif split == "test":
         if hourly_outage_summary is not None:
-            train_labels = (
-                apply_scada_outage_correction_to_labels(
-                    train_labels=train_labels,
-                    hourly_outage_summary=(
-                        hourly_outage_summary
-                    ),
-                    upper_ratio=label_upper_ratio
-                )
+            raise ValueError(
+                "Test에는 SCADA 장기정지 요약을 "
+                "전달하면 안 됩니다."
             )
 
-        # 원본 train_labels와 구분하여 보정본 저장
-        corrected_labels_path = (
-            save_dir
-            / "train_labels_outage_corrected.csv"
-        )
-
-        (
-            train_labels
-            .rename(
-                columns={
-                    "forecast_kst_dtm":
-                    "kst_dtm"
-                }
-            )
-            .to_csv(
-                corrected_labels_path,
-                index=False,
-                encoding="utf-8-sig",
-                date_format="%Y-%m-%d %H:%M:%S"
-            )
-        )
-
-        print(
-            "보정된 Train Label 저장:",
-            corrected_labels_path.name
-        )
-
-    elif split != "test":
+    else:
         raise ValueError(
             "split은 'train' 또는 'test'여야 합니다."
         )
@@ -3715,7 +3576,20 @@ def process_grouped_dataset(
             ldaps_processed=ldaps_processed,
             gfs_grid5=gfs_grid5,
             group_id=group_id,
-            train_labels=train_labels
+            train_labels=train_labels,
+            hourly_outage_summary=(
+                hourly_outage_summary
+                if split == "train"
+                else None
+            )
+        )
+
+        # 저장 직전에도 한 번 더 검사
+        assert_no_scada_columns(
+            df=group_df,
+            data_name=(
+                f"{split.upper()} Group {group_id}"
+            )
         )
 
         output_path = (
@@ -3749,7 +3623,7 @@ def process_grouped_dataset(
 
 
 # =========================================================
-# 5. SCADA + 기상 + Label 전체 통합 실행 함수
+# 6. SCADA + 기상 + Label 전체 통합 실행 함수
 # 기존 run_preprocessing()을 이 함수로 교체
 # =========================================================
 def run_preprocessing(
@@ -3763,13 +3637,20 @@ def run_preprocessing(
     1. SCADA 저출력 원인 분류
     2. 24시간 이상 장기연속정지 판정
     3. VESTAS Group 1·2 시간별 장기정지 터빈 수 계산
-    4. SCADA cleaned CSV 저장
+    4. SCADA cleaned CSV와 장기정지 요약을 별도 저장
     5. Train 기상변수 전처리
-    6. Group 1·2 Label을 가동 터빈 수에 비례해 보정
-    7. 장기정지 보정 행은 삭제하지 않고 유지
+    6. Group 1·2에서 장기정지 터빈이 한 대라도 있는
+       해당 그룹·시간 학습 행 삭제
+    7. train_labels 값은 비례 보정하지 않고 원값 사용
     8. Group 3 원래 Target 결측 제외
     9. Test 기상변수 전처리
-    10. 그룹별 최종 CSV 저장
+    10. SCADA 열이 없는 그룹별 최종 CSV 저장
+
+    주의:
+    - Group 1 장기정지는 Group 1 Train에서만 삭제합니다.
+    - Group 2 장기정지는 Group 2 Train에서만 삭제합니다.
+    - 같은 시각의 다른 그룹 행은 유지합니다.
+    - Test에는 SCADA 정보를 사용하지 않습니다.
     """
 
     input_dir = Path(
@@ -3805,7 +3686,6 @@ def run_preprocessing(
     print("1단계: SCADA 장기 고장·정비 판정")
     print("=" * 70)
 
-    # 착빙 판정에 사용할 LDAPS 기상값 준비
     ldaps_icing_weather = (
         prepare_ldaps_icing_weather(
             input_dir
@@ -3813,7 +3693,7 @@ def run_preprocessing(
         )
     )
 
-    # VESTAS: Group 1·2
+    # VESTAS: Group 1·2의 장기정지 판단에 사용
     (
         vestas_cleaned,
         vestas_diagnostics
@@ -3824,8 +3704,6 @@ def run_preprocessing(
         save_dir=save_dir
     )
 
-    # 이미 24시간 이상 장기연속정지로 확정된
-    # 터빈 수를 시간별 Group 요약으로 변환
     hourly_outage_summary = (
         build_hourly_outage_summary(
             vestas_diagnostics=(
@@ -3834,7 +3712,8 @@ def run_preprocessing(
         )
     )
 
-    # UNISON: cleaned SCADA 파일 생성
+    # UNISON은 cleaned SCADA 파일만 별도 생성하며,
+    # Group 1·2 행 삭제에는 사용하지 않음
     (
         unison_cleaned,
         unison_diagnostics
@@ -3863,6 +3742,8 @@ def run_preprocessing(
         / "scada_vestas_hourly_outage_summary.csv"
     )
 
+    # 이 파일은 진단용 별도 파일이며,
+    # 최종 모델 입력 파일에는 병합하지 않음
     hourly_outage_summary.to_csv(
         outage_summary_path,
         index=False,
@@ -3875,8 +3756,6 @@ def run_preprocessing(
         outage_summary_path.name
     )
 
-    # cleaned 파일은 저장됐고,
-    # 이후에는 시간별 장기정지 터빈 수 요약만 필요
     del (
         ldaps_icing_weather,
         vestas_cleaned,
@@ -3973,7 +3852,6 @@ def run_preprocessing(
             print("4단계: Test 그룹별 전처리")
             print("=" * 70)
 
-            # Test에는 SCADA 플래그를 절대 적용하지 않음
             results["test"] = (
                 process_grouped_dataset(
                     split="test",
@@ -4030,11 +3908,7 @@ def run_preprocessing(
 
 
 # =========================================================
-# 6. 최종 실행부
-#
-# 기존 SCADA의 '# 11. 전체 실행'은 삭제
-# 기존 기상 코드의 '# 9. 실행'도 삭제
-# 아래 실행부 하나만 맨 마지막에 배치
+# 7. 최종 실행부
 # =========================================================
 if __name__ == "__main__":
     results = run_preprocessing(
@@ -4043,7 +3917,7 @@ if __name__ == "__main__":
         process_test_if_available=True
     )
 
-    # 최종 Train
+    # 최종 Train: 기상 피처 + 해당 그룹 Target만 포함
     train_group1 = (
         results["train"]["group1"]
     )
@@ -4056,14 +3930,14 @@ if __name__ == "__main__":
         results["train"]["group3"]
     )
 
-    # 시간별 SCADA 장기정지 터빈 수 요약
+    # 진단용 시간별 장기정지 요약
+    # 최종 그룹별 모델 파일에는 포함되지 않음
     hourly_outage_summary = (
         results[
             "hourly_outage_summary"
         ]
     )
 
-    # 최종 Test
     if "test" in results:
         test_group1 = (
             results["test"]["group1"]

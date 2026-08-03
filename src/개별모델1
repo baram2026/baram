@@ -1,0 +1,1773 @@
+from pathlib import Path
+
+# 프로젝트 최상위 경로
+BASE_DIR = Path("/content/풍력발전공모전")
+
+# 데이터 및 결과 폴더
+RAW_DIR = BASE_DIR / "content"
+PREPROCESSED_DIR = BASE_DIR / "preprocessed"
+OUTPUT_DIR = BASE_DIR / "output"
+MODEL_DIR = BASE_DIR / "models"
+
+# 폴더가 없으면 자동 생성
+for directory in [
+    RAW_DIR,
+    PREPROCESSED_DIR,
+    OUTPUT_DIR,
+    MODEL_DIR
+]:
+    directory.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+# ============================================================
+# Group 1·2·3 최종 모델 통합 Test 예측
+#
+# Group 1
+# - 상단 집중 고출력 가중 LightGBM 100%
+# - CF < 50%      : 1.0
+# - CF 50~70%     : 1.2
+# - CF 70~90%     : 2.0
+# - CF >= 90%     : 6.0
+#
+# Group 2
+# - 기본 XGBoost 50%
+# - 기본 LightGBM 50%
+#
+# Group 3
+# - 전용 고출력 가중 XGBoost 75%
+# - 글로벌 XGBoost 25%
+# - CF 10~50%     : 1.0
+# - CF 50~70%     : 1.5
+# - CF 70~90%     : 2.5
+# - CF >= 90%     : 4.0
+#
+# 학습 방법
+# 1. 2022~2023 Train / 2024 Validation으로 최적 트리 수 결정
+# 2. Train + Validation 전체 라벨 데이터로 최종 재학습
+# 3. 2025 Test 예측
+#
+# 생성 파일
+# - /content/final_submission.csv
+#
+# 그래프 없음
+# NMAE·FICR 계산 및 출력 없음
+# 별도 모델 파일 저장 없음
+# ============================================================
+
+# 필요할 경우 한 번만 실행
+# !pip install -q xgboost lightgbm
+
+from pathlib import Path
+import warnings
+
+import numpy as np
+import pandas as pd
+
+from xgboost import XGBRegressor
+
+import lightgbm as lgb
+from lightgbm import LGBMRegressor
+
+
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning
+)
+
+
+# ============================================================
+# 1. 기본 설정
+# ============================================================
+
+SEARCH_ROOT = Path("/content")
+
+TIME_COL = "forecast_kst_dtm"
+
+VALID_START = pd.Timestamp(
+    "2024-01-01 01:00:00"
+)
+
+OFFICIAL_MIN_CF = 0.10
+PREDICTION_MAX_CF = 1.05
+
+RANDOM_STATE = 42
+
+# 앞선 모델 실험과 동일하게
+# 실제 CF 10% 이상 행만 모델 학습에 사용
+TRAIN_ONLY_OFFICIAL_RANGE = True
+
+OUTPUT_PATH = (
+    SEARCH_ROOT
+    / "final_submission.csv"
+)
+
+
+GROUP_CONFIG = {
+    1: {
+        "train_filename":
+            "train_group1_preprocessed.csv",
+
+        "test_filename":
+            "test_group1_preprocessed.csv",
+
+        "target_col":
+            "kpx_group_1",
+
+        "capacity_kwh":
+            21_600.0
+    },
+
+    2: {
+        "train_filename":
+            "train_group2_preprocessed.csv",
+
+        "test_filename":
+            "test_group2_preprocessed.csv",
+
+        "target_col":
+            "kpx_group_2",
+
+        "capacity_kwh":
+            21_600.0
+    },
+
+    3: {
+        "train_filename":
+            "train_group3_preprocessed.csv",
+
+        "test_filename":
+            "test_group3_preprocessed.csv",
+
+        "target_col":
+            "kpx_group_3",
+
+        "capacity_kwh":
+            21_000.0
+    }
+}
+
+
+# Group 1 최종 확정 가중치
+GROUP1_WEIGHT_SCHEME = {
+    "below_50": 1.0,
+    "cf_50_70": 1.2,
+    "cf_70_90": 2.0,
+    "above_90": 6.0
+}
+
+
+# Group 3 최종 확정 가중치
+GROUP3_WEIGHT_SCHEME = {
+    "below_50": 1.0,
+    "cf_50_70": 1.5,
+    "cf_70_90": 2.5,
+    "above_90": 4.0
+}
+
+
+# ============================================================
+# 2. 파일 탐색 함수
+# ============================================================
+
+def find_file(
+    filename,
+    search_root=SEARCH_ROOT
+):
+    matches = sorted(
+        search_root.rglob(filename)
+    )
+
+    if not matches:
+        raise FileNotFoundError(
+            f"'{filename}'을 {search_root}에서 "
+            "찾지 못했습니다."
+        )
+
+    # 전처리 결과 파일은 preprocessed 폴더를 우선 선택
+    preferred_matches = [
+        path
+        for path in matches
+        if "preprocessed" in str(path).lower()
+    ]
+
+    if preferred_matches:
+        matches = preferred_matches
+
+    return matches[0]
+
+
+# ============================================================
+# 3. 그룹별 Train·Test 데이터 로드
+# ============================================================
+
+def load_group_data(
+    group_id,
+    config
+):
+    train_path = find_file(
+        config["train_filename"]
+    )
+
+    test_path = find_file(
+        config["test_filename"]
+    )
+
+    train_df = pd.read_csv(
+        train_path,
+        encoding="utf-8-sig"
+    )
+
+    test_df = pd.read_csv(
+        test_path,
+        encoding="utf-8-sig"
+    )
+
+    target_col = config["target_col"]
+    capacity_kwh = config["capacity_kwh"]
+
+    # --------------------------------------------------------
+    # 필수 컬럼 확인
+    # --------------------------------------------------------
+
+    if TIME_COL not in train_df.columns:
+        raise KeyError(
+            f"Group {group_id} Train에 "
+            f"'{TIME_COL}' 컬럼이 없습니다."
+        )
+
+    if TIME_COL not in test_df.columns:
+        raise KeyError(
+            f"Group {group_id} Test에 "
+            f"'{TIME_COL}' 컬럼이 없습니다."
+        )
+
+    if target_col not in train_df.columns:
+        raise KeyError(
+            f"Group {group_id} Train에 "
+            f"'{target_col}' 컬럼이 없습니다."
+        )
+
+    # --------------------------------------------------------
+    # 시간 변환 및 정렬
+    # --------------------------------------------------------
+
+    train_df[TIME_COL] = pd.to_datetime(
+        train_df[TIME_COL],
+        errors="raise"
+    )
+
+    test_df[TIME_COL] = pd.to_datetime(
+        test_df[TIME_COL],
+        errors="raise"
+    )
+
+    train_df = (
+        train_df
+        .sort_values(TIME_COL)
+        .reset_index(drop=True)
+    )
+
+    test_df = (
+        test_df
+        .sort_values(TIME_COL)
+        .reset_index(drop=True)
+    )
+
+    # --------------------------------------------------------
+    # 중복 시각 확인
+    # --------------------------------------------------------
+
+    if train_df[TIME_COL].duplicated().any():
+        raise ValueError(
+            f"Group {group_id} Train에 "
+            "중복된 예측 시각이 있습니다."
+        )
+
+    if test_df[TIME_COL].duplicated().any():
+        raise ValueError(
+            f"Group {group_id} Test에 "
+            "중복된 예측 시각이 있습니다."
+        )
+
+    # --------------------------------------------------------
+    # 타깃 정리
+    # --------------------------------------------------------
+
+    train_df[target_col] = pd.to_numeric(
+        train_df[target_col],
+        errors="coerce"
+    )
+
+    # Group 3의 제공되지 않은 과거 구간 등이 있다면 제거
+    train_df = train_df.loc[
+        train_df[target_col].notna()
+    ].copy()
+
+    if train_df.empty:
+        raise ValueError(
+            f"Group {group_id}의 유효한 Train 행이 없습니다."
+        )
+
+    if np.isinf(
+        train_df[target_col].to_numpy()
+    ).any():
+        raise ValueError(
+            f"Group {group_id} 타깃에 무한대가 있습니다."
+        )
+
+    train_df["target_cf"] = (
+        train_df[target_col]
+        / capacity_kwh
+    )
+
+    # --------------------------------------------------------
+    # 입력 피처 설정
+    # --------------------------------------------------------
+
+    all_target_cols = [
+        col
+        for col in train_df.columns
+        if col.startswith("kpx_group_")
+    ]
+
+    exclude_cols = [
+        TIME_COL,
+        "target_cf",
+        *all_target_cols
+    ]
+
+    feature_cols = [
+        col
+        for col in train_df.columns
+        if col not in exclude_cols
+    ]
+
+    non_numeric_train_cols = (
+        train_df[feature_cols]
+        .select_dtypes(
+            exclude=[np.number]
+        )
+        .columns
+        .tolist()
+    )
+
+    if non_numeric_train_cols:
+        raise TypeError(
+            f"Group {group_id} Train에 숫자가 아닌 "
+            f"피처가 있습니다:\n{non_numeric_train_cols}"
+        )
+
+    missing_test_features = [
+        col
+        for col in feature_cols
+        if col not in test_df.columns
+    ]
+
+    if missing_test_features:
+        raise KeyError(
+            f"Group {group_id} Test에 Train 피처가 "
+            f"누락돼 있습니다:\n{missing_test_features}"
+        )
+
+    # Test에서 Train과 같은 피처 순서 사용
+    test_feature_df = test_df[
+        feature_cols
+    ].copy()
+
+    non_numeric_test_cols = (
+        test_feature_df
+        .select_dtypes(
+            exclude=[np.number]
+        )
+        .columns
+        .tolist()
+    )
+
+    if non_numeric_test_cols:
+        raise TypeError(
+            f"Group {group_id} Test에 숫자가 아닌 "
+            f"피처가 있습니다:\n{non_numeric_test_cols}"
+        )
+
+    # 무한대는 결측치로 변환
+    # XGBoost와 LightGBM이 결측값을 자체 처리
+    train_df[feature_cols] = (
+        train_df[feature_cols]
+        .replace(
+            [np.inf, -np.inf],
+            np.nan
+        )
+    )
+
+    test_df[feature_cols] = (
+        test_df[feature_cols]
+        .replace(
+            [np.inf, -np.inf],
+            np.nan
+        )
+    )
+
+    return {
+        "group_id": group_id,
+        "train_path": train_path,
+        "test_path": test_path,
+        "train": train_df,
+        "test": test_df,
+        "features": feature_cols,
+        "target_col": target_col,
+        "capacity_kwh": capacity_kwh
+    }
+
+
+group_data = {
+    group_id: load_group_data(
+        group_id=group_id,
+        config=config
+    )
+    for group_id, config
+    in GROUP_CONFIG.items()
+}
+
+
+# ============================================================
+# 4. 공식 학습 범위 선택
+# ============================================================
+
+def get_model_rows(
+    df
+):
+    if TRAIN_ONLY_OFFICIAL_RANGE:
+        return df.loc[
+            df["target_cf"]
+            >= OFFICIAL_MIN_CF
+        ].copy()
+
+    return df.copy()
+
+
+# ============================================================
+# 5. 학습 가중치 생성
+# ============================================================
+
+def make_output_weights(
+    target_cf,
+    scheme
+):
+    """
+    실제 발전량 CF 구간별 sample_weight 생성.
+
+    반환 가중치는 평균 1로 정규화하지만
+    구간 간 상대적 비율은 그대로 유지합니다.
+    """
+
+    cf = np.asarray(
+        target_cf,
+        dtype=float
+    )
+
+    weights = np.full(
+        len(cf),
+        scheme["below_50"],
+        dtype=float
+    )
+
+    weights[
+        (cf >= 0.50)
+        & (cf < 0.70)
+    ] = scheme["cf_50_70"]
+
+    weights[
+        (cf >= 0.70)
+        & (cf < 0.90)
+    ] = scheme["cf_70_90"]
+
+    weights[
+        cf >= 0.90
+    ] = scheme["above_90"]
+
+    weights = (
+        weights
+        / weights.mean()
+    )
+
+    return weights
+
+
+def make_equal_group_weights(
+    group_ids
+):
+    """
+    글로벌 모델에서 각 그룹의 총 가중치가
+    동일해지도록 그룹별 표본 수를 보정합니다.
+    """
+
+    group_series = pd.Series(
+        group_ids
+    ).reset_index(drop=True)
+
+    group_counts = (
+        group_series
+        .value_counts()
+    )
+
+    weights = group_series.map(
+        lambda group_id:
+        1.0 / group_counts.loc[group_id]
+    ).to_numpy(dtype=float)
+
+    weights = (
+        weights
+        / weights.mean()
+    )
+
+    return weights
+
+
+# ============================================================
+# 6. 모델 생성 함수
+# ============================================================
+
+def create_lgbm_model(
+    n_estimators
+):
+    return LGBMRegressor(
+        objective="regression_l1",
+
+        n_estimators=int(
+            max(1, n_estimators)
+        ),
+
+        learning_rate=0.03,
+
+        num_leaves=31,
+        max_depth=6,
+        min_child_samples=100,
+
+        subsample=0.8,
+        subsample_freq=1,
+        colsample_bytree=0.75,
+
+        reg_alpha=0.1,
+        reg_lambda=10.0,
+
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+
+        verbosity=-1
+    )
+
+
+def create_base_xgb_model(
+    n_estimators,
+    use_early_stopping=False
+):
+    params = {
+        "objective": "reg:squarederror",
+
+        "n_estimators": int(
+            max(1, n_estimators)
+        ),
+
+        "learning_rate": 0.03,
+
+        "max_depth": 5,
+        "min_child_weight": 10,
+
+        "subsample": 0.8,
+        "colsample_bytree": 0.75,
+
+        "reg_alpha": 0.1,
+        "reg_lambda": 10.0,
+
+        "tree_method": "hist",
+        "eval_metric": "mae",
+
+        "random_state": RANDOM_STATE,
+        "n_jobs": -1,
+
+        "verbosity": 0
+    }
+
+    if use_early_stopping:
+        params[
+            "early_stopping_rounds"
+        ] = 150
+
+    return XGBRegressor(
+        **params
+    )
+
+
+def create_group3_xgb_model(
+    n_estimators,
+    use_early_stopping=False
+):
+    """
+    Group 3는 학습 기간이 상대적으로 짧으므로
+    조금 더 강한 규제를 적용합니다.
+    """
+
+    params = {
+        "objective": "reg:squarederror",
+
+        "n_estimators": int(
+            max(1, n_estimators)
+        ),
+
+        "learning_rate": 0.03,
+
+        "max_depth": 4,
+        "min_child_weight": 15,
+
+        "subsample": 0.8,
+        "colsample_bytree": 0.75,
+
+        "reg_alpha": 0.1,
+        "reg_lambda": 15.0,
+
+        "tree_method": "hist",
+        "eval_metric": "mae",
+
+        "random_state": RANDOM_STATE,
+        "n_jobs": -1,
+
+        "verbosity": 0
+    }
+
+    if use_early_stopping:
+        params[
+            "early_stopping_rounds"
+        ] = 150
+
+    return XGBRegressor(
+        **params
+    )
+
+
+# ============================================================
+# 7. 최적 트리 수 선택 함수
+# ============================================================
+
+def select_lgbm_iterations(
+    X_train,
+    y_train,
+    X_valid,
+    y_valid,
+    sample_weight=None
+):
+    model = create_lgbm_model(
+        n_estimators=3000
+    )
+
+    model.fit(
+        X_train,
+        y_train,
+
+        sample_weight=sample_weight,
+
+        eval_set=[
+            (
+                X_valid,
+                y_valid
+            )
+        ],
+
+        eval_metric="l1",
+
+        callbacks=[
+            lgb.early_stopping(
+                stopping_rounds=150,
+                first_metric_only=True,
+                verbose=False
+            ),
+
+            lgb.log_evaluation(
+                period=0
+            )
+        ]
+    )
+
+    best_iteration = getattr(
+        model,
+        "best_iteration_",
+        None
+    )
+
+    if (
+        best_iteration is None
+        or best_iteration <= 0
+    ):
+        best_iteration = 3000
+
+    return int(
+        best_iteration
+    )
+
+
+def select_xgb_iterations(
+    X_train,
+    y_train,
+    X_valid,
+    y_valid,
+    sample_weight=None,
+    group3_regularization=False
+):
+    if group3_regularization:
+        model = create_group3_xgb_model(
+            n_estimators=3000,
+            use_early_stopping=True
+        )
+
+    else:
+        model = create_base_xgb_model(
+            n_estimators=3000,
+            use_early_stopping=True
+        )
+
+    model.fit(
+        X_train,
+        y_train,
+
+        sample_weight=sample_weight,
+
+        eval_set=[
+            (
+                X_valid,
+                y_valid
+            )
+        ],
+
+        verbose=False
+    )
+
+    # XGBoost best_iteration은 0부터 시작하므로 +1
+    best_iteration = getattr(
+        model,
+        "best_iteration",
+        None
+    )
+
+    if best_iteration is None:
+        return 3000
+
+    return int(
+        best_iteration + 1
+    )
+
+
+# ============================================================
+# 8. 최종 모델 학습 함수
+# ============================================================
+
+def fit_final_lgbm(
+    X_full,
+    y_full,
+    n_estimators,
+    sample_weight=None
+):
+    model = create_lgbm_model(
+        n_estimators=n_estimators
+    )
+
+    model.fit(
+        X_full,
+        y_full,
+        sample_weight=sample_weight
+    )
+
+    return model
+
+
+def fit_final_xgb(
+    X_full,
+    y_full,
+    n_estimators,
+    sample_weight=None,
+    group3_regularization=False
+):
+    if group3_regularization:
+        model = create_group3_xgb_model(
+            n_estimators=n_estimators,
+            use_early_stopping=False
+        )
+
+    else:
+        model = create_base_xgb_model(
+            n_estimators=n_estimators,
+            use_early_stopping=False
+        )
+
+    model.fit(
+        X_full,
+        y_full,
+        sample_weight=sample_weight,
+        verbose=False
+    )
+
+    return model
+
+
+# ============================================================
+# 9. Group 1
+# 상단 집중 가중 LightGBM 100%
+# ============================================================
+
+group1 = group_data[1]
+
+group1_train_part = get_model_rows(
+    group1["train"].loc[
+        group1["train"][TIME_COL]
+        < VALID_START
+    ]
+)
+
+group1_valid_part = get_model_rows(
+    group1["train"].loc[
+        group1["train"][TIME_COL]
+        >= VALID_START
+    ]
+)
+
+if (
+    group1_train_part.empty
+    or group1_valid_part.empty
+):
+    raise ValueError(
+        "Group 1 Train/Validation 분할이 비어 있습니다."
+    )
+
+
+group1_train_weights = (
+    make_output_weights(
+        target_cf=(
+            group1_train_part["target_cf"]
+        ),
+        scheme=GROUP1_WEIGHT_SCHEME
+    )
+)
+
+
+group1_best_iterations = (
+    select_lgbm_iterations(
+        X_train=group1_train_part[
+            group1["features"]
+        ],
+
+        y_train=group1_train_part[
+            "target_cf"
+        ],
+
+        X_valid=group1_valid_part[
+            group1["features"]
+        ],
+
+        y_valid=group1_valid_part[
+            "target_cf"
+        ],
+
+        sample_weight=group1_train_weights
+    )
+)
+
+
+# Train + Validation 전체 재학습
+group1_full_train = get_model_rows(
+    group1["train"]
+)
+
+group1_full_weights = (
+    make_output_weights(
+        target_cf=(
+            group1_full_train["target_cf"]
+        ),
+        scheme=GROUP1_WEIGHT_SCHEME
+    )
+)
+
+
+group1_final_model = fit_final_lgbm(
+    X_full=group1_full_train[
+        group1["features"]
+    ],
+
+    y_full=group1_full_train[
+        "target_cf"
+    ],
+
+    n_estimators=group1_best_iterations,
+
+    sample_weight=group1_full_weights
+)
+
+
+group1_test_prediction_cf = (
+    group1_final_model.predict(
+        group1["test"][
+            group1["features"]
+        ]
+    )
+)
+
+group1_test_prediction_cf = np.clip(
+    group1_test_prediction_cf,
+    0,
+    PREDICTION_MAX_CF
+)
+
+group1_test_prediction_kwh = (
+    group1_test_prediction_cf
+    * group1["capacity_kwh"]
+)
+
+
+# ============================================================
+# 10. Group 2
+# 기본 XGBoost 50% + 기본 LightGBM 50%
+# ============================================================
+
+group2 = group_data[2]
+
+group2_train_part = get_model_rows(
+    group2["train"].loc[
+        group2["train"][TIME_COL]
+        < VALID_START
+    ]
+)
+
+group2_valid_part = get_model_rows(
+    group2["train"].loc[
+        group2["train"][TIME_COL]
+        >= VALID_START
+    ]
+)
+
+if (
+    group2_train_part.empty
+    or group2_valid_part.empty
+):
+    raise ValueError(
+        "Group 2 Train/Validation 분할이 비어 있습니다."
+    )
+
+
+# ------------------------------------------------------------
+# Group 2 기본 XGBoost
+# ------------------------------------------------------------
+
+group2_xgb_best_iterations = (
+    select_xgb_iterations(
+        X_train=group2_train_part[
+            group2["features"]
+        ],
+
+        y_train=group2_train_part[
+            "target_cf"
+        ],
+
+        X_valid=group2_valid_part[
+            group2["features"]
+        ],
+
+        y_valid=group2_valid_part[
+            "target_cf"
+        ],
+
+        sample_weight=None,
+
+        group3_regularization=False
+    )
+)
+
+
+# ------------------------------------------------------------
+# Group 2 기본 LightGBM
+# ------------------------------------------------------------
+
+group2_lgbm_best_iterations = (
+    select_lgbm_iterations(
+        X_train=group2_train_part[
+            group2["features"]
+        ],
+
+        y_train=group2_train_part[
+            "target_cf"
+        ],
+
+        X_valid=group2_valid_part[
+            group2["features"]
+        ],
+
+        y_valid=group2_valid_part[
+            "target_cf"
+        ],
+
+        sample_weight=None
+    )
+)
+
+
+# ------------------------------------------------------------
+# Train + Validation 전체 재학습
+# ------------------------------------------------------------
+
+group2_full_train = get_model_rows(
+    group2["train"]
+)
+
+
+group2_final_xgb = fit_final_xgb(
+    X_full=group2_full_train[
+        group2["features"]
+    ],
+
+    y_full=group2_full_train[
+        "target_cf"
+    ],
+
+    n_estimators=(
+        group2_xgb_best_iterations
+    ),
+
+    sample_weight=None,
+
+    group3_regularization=False
+)
+
+
+group2_final_lgbm = fit_final_lgbm(
+    X_full=group2_full_train[
+        group2["features"]
+    ],
+
+    y_full=group2_full_train[
+        "target_cf"
+    ],
+
+    n_estimators=(
+        group2_lgbm_best_iterations
+    ),
+
+    sample_weight=None
+)
+
+
+group2_xgb_test_prediction_cf = (
+    group2_final_xgb.predict(
+        group2["test"][
+            group2["features"]
+        ]
+    )
+)
+
+group2_lgbm_test_prediction_cf = (
+    group2_final_lgbm.predict(
+        group2["test"][
+            group2["features"]
+        ]
+    )
+)
+
+
+group2_test_prediction_cf = np.clip(
+    0.50
+    * group2_xgb_test_prediction_cf
+
+    + 0.50
+    * group2_lgbm_test_prediction_cf,
+
+    0,
+    PREDICTION_MAX_CF
+)
+
+
+group2_test_prediction_kwh = (
+    group2_test_prediction_cf
+    * group2["capacity_kwh"]
+)
+
+
+# ============================================================
+# 11. 글로벌 모델 피처 구조 생성
+# ============================================================
+
+# 그룹별 서로 다른 LDAPS 격자 컬럼을 모두 보존하기 위해
+# 전체 피처 합집합을 사용하고, 없는 컬럼은 NaN으로 둠
+global_base_features = sorted(
+    set().union(
+        *[
+            set(
+                group_data[group_id][
+                    "features"
+                ]
+            )
+            for group_id in [1, 2, 3]
+        ]
+    )
+)
+
+
+global_indicator_cols = [
+    "global_group_1",
+    "global_group_2",
+    "global_group_3"
+]
+
+
+global_feature_cols = (
+    global_base_features
+    + global_indicator_cols
+)
+
+
+def make_global_features(
+    source_df,
+    group_id
+):
+    X = source_df.reindex(
+        columns=global_base_features
+    ).copy()
+
+    X = X.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+    for indicator_group in [1, 2, 3]:
+        X[
+            f"global_group_{indicator_group}"
+        ] = float(
+            group_id
+            == indicator_group
+        )
+
+    return X[
+        global_feature_cols
+    ]
+
+
+# ============================================================
+# 12. 글로벌 모델의 최적 트리 수 선택
+# ============================================================
+
+global_train_X_parts = []
+global_train_y_parts = []
+global_train_group_ids = []
+
+global_valid_X_parts = []
+global_valid_y_parts = []
+
+
+for group_id in [1, 2, 3]:
+
+    current_group = group_data[
+        group_id
+    ]
+
+    current_train_part = get_model_rows(
+        current_group["train"].loc[
+            current_group["train"][TIME_COL]
+            < VALID_START
+        ]
+    )
+
+    current_valid_part = get_model_rows(
+        current_group["train"].loc[
+            current_group["train"][TIME_COL]
+            >= VALID_START
+        ]
+    )
+
+    global_train_X_parts.append(
+        make_global_features(
+            source_df=current_train_part,
+            group_id=group_id
+        ).reset_index(drop=True)
+    )
+
+    global_train_y_parts.append(
+        current_train_part[
+            "target_cf"
+        ].reset_index(drop=True)
+    )
+
+    global_train_group_ids.extend(
+        [group_id]
+        * len(current_train_part)
+    )
+
+    global_valid_X_parts.append(
+        make_global_features(
+            source_df=current_valid_part,
+            group_id=group_id
+        ).reset_index(drop=True)
+    )
+
+    global_valid_y_parts.append(
+        current_valid_part[
+            "target_cf"
+        ].reset_index(drop=True)
+    )
+
+
+global_selector_X_train = pd.concat(
+    global_train_X_parts,
+    axis=0,
+    ignore_index=True
+)
+
+global_selector_y_train = pd.concat(
+    global_train_y_parts,
+    axis=0,
+    ignore_index=True
+)
+
+global_selector_X_valid = pd.concat(
+    global_valid_X_parts,
+    axis=0,
+    ignore_index=True
+)
+
+global_selector_y_valid = pd.concat(
+    global_valid_y_parts,
+    axis=0,
+    ignore_index=True
+)
+
+
+global_selector_weights = (
+    make_equal_group_weights(
+        global_train_group_ids
+    )
+)
+
+
+global_best_iterations = (
+    select_xgb_iterations(
+        X_train=global_selector_X_train,
+        y_train=global_selector_y_train,
+
+        X_valid=global_selector_X_valid,
+        y_valid=global_selector_y_valid,
+
+        sample_weight=(
+            global_selector_weights
+        ),
+
+        group3_regularization=False
+    )
+)
+
+
+# 메모리 절약
+del (
+    global_train_X_parts,
+    global_train_y_parts,
+    global_train_group_ids,
+    global_valid_X_parts,
+    global_valid_y_parts,
+    global_selector_X_train,
+    global_selector_y_train,
+    global_selector_X_valid,
+    global_selector_y_valid,
+    global_selector_weights
+)
+
+
+# ============================================================
+# 13. 글로벌 모델 전체 데이터 재학습
+# ============================================================
+
+global_full_X_parts = []
+global_full_y_parts = []
+global_full_group_ids = []
+
+
+for group_id in [1, 2, 3]:
+
+    current_group = group_data[
+        group_id
+    ]
+
+    current_full_train = get_model_rows(
+        current_group["train"]
+    )
+
+    global_full_X_parts.append(
+        make_global_features(
+            source_df=current_full_train,
+            group_id=group_id
+        ).reset_index(drop=True)
+    )
+
+    global_full_y_parts.append(
+        current_full_train[
+            "target_cf"
+        ].reset_index(drop=True)
+    )
+
+    global_full_group_ids.extend(
+        [group_id]
+        * len(current_full_train)
+    )
+
+
+global_full_X = pd.concat(
+    global_full_X_parts,
+    axis=0,
+    ignore_index=True
+)
+
+global_full_y = pd.concat(
+    global_full_y_parts,
+    axis=0,
+    ignore_index=True
+)
+
+global_full_weights = (
+    make_equal_group_weights(
+        global_full_group_ids
+    )
+)
+
+
+global_final_model = fit_final_xgb(
+    X_full=global_full_X,
+    y_full=global_full_y,
+
+    n_estimators=(
+        global_best_iterations
+    ),
+
+    sample_weight=(
+        global_full_weights
+    ),
+
+    group3_regularization=False
+)
+
+
+# 메모리 절약
+del (
+    global_full_X_parts,
+    global_full_y_parts,
+    global_full_group_ids,
+    global_full_X,
+    global_full_y,
+    global_full_weights
+)
+
+
+# ============================================================
+# 14. Group 3 전용 고출력 가중 XGBoost
+# ============================================================
+
+group3 = group_data[3]
+
+group3_train_part = get_model_rows(
+    group3["train"].loc[
+        group3["train"][TIME_COL]
+        < VALID_START
+    ]
+)
+
+group3_valid_part = get_model_rows(
+    group3["train"].loc[
+        group3["train"][TIME_COL]
+        >= VALID_START
+    ]
+)
+
+if (
+    group3_train_part.empty
+    or group3_valid_part.empty
+):
+    raise ValueError(
+        "Group 3 Train/Validation 분할이 비어 있습니다."
+    )
+
+
+group3_train_weights = (
+    make_output_weights(
+        target_cf=(
+            group3_train_part["target_cf"]
+        ),
+        scheme=GROUP3_WEIGHT_SCHEME
+    )
+)
+
+
+group3_best_iterations = (
+    select_xgb_iterations(
+        X_train=group3_train_part[
+            group3["features"]
+        ],
+
+        y_train=group3_train_part[
+            "target_cf"
+        ],
+
+        X_valid=group3_valid_part[
+            group3["features"]
+        ],
+
+        y_valid=group3_valid_part[
+            "target_cf"
+        ],
+
+        sample_weight=(
+            group3_train_weights
+        ),
+
+        group3_regularization=True
+    )
+)
+
+
+# Train + Validation 전체 재학습
+group3_full_train = get_model_rows(
+    group3["train"]
+)
+
+group3_full_weights = (
+    make_output_weights(
+        target_cf=(
+            group3_full_train["target_cf"]
+        ),
+        scheme=GROUP3_WEIGHT_SCHEME
+    )
+)
+
+
+group3_final_dedicated_model = (
+    fit_final_xgb(
+        X_full=group3_full_train[
+            group3["features"]
+        ],
+
+        y_full=group3_full_train[
+            "target_cf"
+        ],
+
+        n_estimators=(
+            group3_best_iterations
+        ),
+
+        sample_weight=(
+            group3_full_weights
+        ),
+
+        group3_regularization=True
+    )
+)
+
+
+# ============================================================
+# 15. Group 3 Test 예측
+# 전용 75% + 글로벌 25%
+# ============================================================
+
+group3_dedicated_test_prediction_cf = (
+    group3_final_dedicated_model.predict(
+        group3["test"][
+            group3["features"]
+        ]
+    )
+)
+
+
+group3_global_test_X = (
+    make_global_features(
+        source_df=group3["test"],
+        group_id=3
+    )
+)
+
+
+group3_global_test_prediction_cf = (
+    global_final_model.predict(
+        group3_global_test_X
+    )
+)
+
+
+group3_test_prediction_cf = np.clip(
+    0.75
+    * group3_dedicated_test_prediction_cf
+
+    + 0.25
+    * group3_global_test_prediction_cf,
+
+    0,
+    PREDICTION_MAX_CF
+)
+
+
+group3_test_prediction_kwh = (
+    group3_test_prediction_cf
+    * group3["capacity_kwh"]
+)
+
+
+# ============================================================
+# 16. 그룹별 Test 예측 시각 정렬
+# ============================================================
+
+group1_prediction_df = pd.DataFrame({
+    TIME_COL:
+        group1["test"][TIME_COL]
+        .to_numpy(),
+
+    "kpx_group_1":
+        group1_test_prediction_kwh
+})
+
+
+group2_prediction_df = pd.DataFrame({
+    TIME_COL:
+        group2["test"][TIME_COL]
+        .to_numpy(),
+
+    "kpx_group_2":
+        group2_test_prediction_kwh
+})
+
+
+group3_prediction_df = pd.DataFrame({
+    TIME_COL:
+        group3["test"][TIME_COL]
+        .to_numpy(),
+
+    "kpx_group_3":
+        group3_test_prediction_kwh
+})
+
+
+prediction_df = (
+    group1_prediction_df
+
+    .merge(
+        group2_prediction_df,
+        on=TIME_COL,
+        how="inner",
+        validate="one_to_one"
+    )
+
+    .merge(
+        group3_prediction_df,
+        on=TIME_COL,
+        how="inner",
+        validate="one_to_one"
+    )
+
+    .sort_values(TIME_COL)
+    .reset_index(drop=True)
+)
+
+
+expected_test_rows = {
+    len(group1["test"]),
+    len(group2["test"]),
+    len(group3["test"])
+}
+
+if len(expected_test_rows) != 1:
+    raise ValueError(
+        "그룹별 Test 행 수가 서로 다릅니다:\n"
+        f"Group 1: {len(group1['test']):,}\n"
+        f"Group 2: {len(group2['test']):,}\n"
+        f"Group 3: {len(group3['test']):,}"
+    )
+
+
+expected_rows = len(
+    group1["test"]
+)
+
+if len(prediction_df) != expected_rows:
+    raise ValueError(
+        "그룹별 예측 시각이 완전히 일치하지 않습니다.\n"
+        f"기대 행 수: {expected_rows:,}\n"
+        f"병합 후 행 수: {len(prediction_df):,}"
+    )
+
+
+# ============================================================
+# 17. sample_submission에 예측값 입력
+# ============================================================
+
+SAMPLE_SUBMISSION_PATH = find_file(
+    "sample_submission.csv"
+)
+
+submission_df = pd.read_csv(
+    SAMPLE_SUBMISSION_PATH,
+    encoding="utf-8-sig"
+)
+
+
+required_submission_cols = [
+    "forecast_id",
+    TIME_COL,
+    "kpx_group_1",
+    "kpx_group_2",
+    "kpx_group_3"
+]
+
+missing_submission_cols = [
+    col
+    for col in required_submission_cols
+    if col not in submission_df.columns
+]
+
+if missing_submission_cols:
+    raise KeyError(
+        "sample_submission.csv에 필요한 컬럼이 없습니다:\n"
+        f"{missing_submission_cols}"
+    )
+
+
+if submission_df[
+    "forecast_id"
+].duplicated().any():
+    raise ValueError(
+        "sample_submission의 forecast_id가 중복돼 있습니다."
+    )
+
+
+submission_time = pd.to_datetime(
+    submission_df[TIME_COL],
+    errors="raise"
+)
+
+
+prediction_lookup = (
+    prediction_df
+    .set_index(TIME_COL)
+)
+
+
+submission_df[
+    "kpx_group_1"
+] = submission_time.map(
+    prediction_lookup[
+        "kpx_group_1"
+    ]
+)
+
+
+submission_df[
+    "kpx_group_2"
+] = submission_time.map(
+    prediction_lookup[
+        "kpx_group_2"
+    ]
+)
+
+
+submission_df[
+    "kpx_group_3"
+] = submission_time.map(
+    prediction_lookup[
+        "kpx_group_3"
+    ]
+)
+
+
+prediction_cols = [
+    "kpx_group_1",
+    "kpx_group_2",
+    "kpx_group_3"
+]
+
+
+if submission_df[
+    prediction_cols
+].isna().any().any():
+
+    missing_rows = submission_df.loc[
+        submission_df[
+            prediction_cols
+        ].isna().any(axis=1),
+
+        [
+            "forecast_id",
+            TIME_COL
+        ]
+    ]
+
+    raise ValueError(
+        "sample_submission의 일부 시각에 "
+        "예측값을 연결하지 못했습니다.\n\n"
+        f"{missing_rows.head(20).to_string(index=False)}"
+    )
+
+
+# 물리적 출력 범위 최종 확인
+submission_df[
+    "kpx_group_1"
+] = submission_df[
+    "kpx_group_1"
+].clip(
+    lower=0,
+    upper=(
+        GROUP_CONFIG[1][
+            "capacity_kwh"
+        ]
+        * PREDICTION_MAX_CF
+    )
+)
+
+
+submission_df[
+    "kpx_group_2"
+] = submission_df[
+    "kpx_group_2"
+].clip(
+    lower=0,
+    upper=(
+        GROUP_CONFIG[2][
+            "capacity_kwh"
+        ]
+        * PREDICTION_MAX_CF
+    )
+)
+
+
+submission_df[
+    "kpx_group_3"
+] = submission_df[
+    "kpx_group_3"
+].clip(
+    lower=0,
+    upper=(
+        GROUP_CONFIG[3][
+            "capacity_kwh"
+        ]
+        * PREDICTION_MAX_CF
+    )
+)
+
+
+# 제출에 필요한 5개 컬럼만 남김
+submission_df = submission_df[
+    required_submission_cols
+]
+
+
+# ============================================================
+# 18. 최종 CSV 저장
+# ============================================================
+
+submission_df.to_csv(
+    OUTPUT_PATH,
+    index=False,
+    encoding="utf-8-sig",
+    float_format="%.6f"
+)
+
+
+print(
+    f"최종 Test 예측 파일 저장 완료: "
+    f"{OUTPUT_PATH}"
+)

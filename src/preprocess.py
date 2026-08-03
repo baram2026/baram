@@ -3132,6 +3132,22 @@ FINAL_FORBIDDEN_COLUMN_TOKENS = (
     "peer_active"
 )
 
+# =========================================================
+# 추가
+# 학습 행 제어용 컬럼입니다.
+#
+# 최종 모델 입력 피처로는 사용하지 않지만,
+# 모델 단계에서 장기정지 행의 삭제·유지·가중치 방식을
+# 선택할 수 있도록 Train 파일에는 남겨 둡니다.
+#
+# Test 파일에는 생성되지 않습니다.
+# =========================================================
+ALLOWED_CONTROL_COLUMNS = frozenset(
+    {
+        "is_long_outage_hour"
+    }
+)
+
 
 def assert_no_scada_columns(
     df,
@@ -3150,7 +3166,9 @@ def assert_no_scada_columns(
     forbidden_cols = [
         col
         for col in df.columns
-        if any(
+        # 추가: 학습 행 제어용 컬럼은 검사에서 제외
+        if col not in ALLOWED_CONTROL_COLUMNS
+        and any(
             token in str(col).lower()
             for token in FINAL_FORBIDDEN_COLUMN_TOKENS
         )
@@ -3173,19 +3191,32 @@ def remove_group_long_outage_rows(
 ):
     """
     Group 1·2에서 해당 그룹의 장기연속정지 터빈이
-    한 대라도 존재하는 시간의 학습 행을 제외합니다.
+    한 대라도 존재하는 시간을 표시합니다.
+
+    추가
+    이전에는 해당 시간의 학습 행을 삭제했지만,
+    지금은 삭제하지 않고 is_long_outage_hour 플래그만 생성합니다.
+    실제 삭제·유지·가중치 적용 여부는 모델 단계에서 결정합니다.
 
     중요:
     - Group 1 장기정지는 Group 1 행에만 적용
     - Group 2 장기정지는 Group 2 행에만 적용
     - 동일 시각의 다른 그룹 행은 유지
     - Group 3에는 VESTAS 장기정지 정보를 적용하지 않음
-    - SCADA 요약 열은 필터링 직후 삭제
+    - SCADA 요약 열은 플래그 생성 직후 삭제
     """
 
     result = group_df.copy()
 
     if group_id == 3:
+        # 추가
+        # Group 3에는 VESTAS 장기정지 정보를 적용하지 않지만,
+        # 세 그룹의 컬럼 구조를 동일하게 유지하기 위해
+        # 플래그 컬럼은 0으로 생성합니다.
+        result[
+            "is_long_outage_hour"
+        ] = np.int8(0)
+
         return result, 0
 
     if group_id not in {1, 2}:
@@ -3289,11 +3320,27 @@ def remove_group_long_outage_rows(
         long_outage_mask.sum()
     )
 
-    # 장기정지 터빈이 한 대라도 있는 해당 그룹 행만 제외
+    # -----------------------------------------------------
+    # 추가
+    # 장기정지 행을 삭제하지 않고 플래그 컬럼만 생성합니다.
+    #
+    # 공식 평가는 장기정지 여부와 무관하게
+    # 실제 발전량이 설비용량의 10% 이상이면 채점합니다.
+    # 따라서 장기정지 시간을 삭제하면
+    # 검증 세트에서 채점 대상 구간이 빠지게 됩니다.
+    #
+    # 행을 유지하고 is_long_outage_hour 플래그만 남기면
+    # 전처리를 한 번만 실행하고도 모델 단계에서
+    # 삭제·유지·가중치 감소 방식을 모두 실험할 수 있습니다.
+    #
+    # 검증은 어떤 경우에도 전체 행으로 수행해야 합니다.
+    # -----------------------------------------------------
+    result[
+        "is_long_outage_hour"
+    ] = long_outage_mask.astype("int8")
+
     result = (
-        result.loc[
-            ~long_outage_mask
-        ]
+        result
         .drop(columns=outage_col)
         .reset_index(drop=True)
     )
@@ -3412,8 +3459,8 @@ def build_group_dataset(
 
     if group_id in {1, 2}:
         print(
-            f"Group {group_id} 장기연속정지 행 제외:",
-            f"{outage_removed_count:,}행"
+            f"Group {group_id} 장기연속정지 시간 플래그:",
+            f"{outage_removed_count:,}행 (삭제하지 않고 유지)"
         )
 
     # -----------------------------------------------------
@@ -3908,45 +3955,82 @@ def run_preprocessing(
 
 
 # =========================================================
+# 추가
 # 7. 최종 실행부
+#
+# 기존 실행부는 입출력 경로가 "/content"로 고정돼 있어
+# Colab이 아닌 환경에서는 파일을 찾지 못했습니다.
+# 명령줄 인자로 경로를 받도록 변경합니다.
+#
+# 사용 예:
+#   python preprocess.py
+#   python preprocess.py --input-dir content --save-dir preprocessed
 # =========================================================
-if __name__ == "__main__":
+def parse_args():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="BARAM 2026 전처리 실행"
+    )
+
+    parser.add_argument(
+        "--input-dir",
+        type=str,
+        default=".",
+        help="원본 CSV가 있는 폴더 (ldaps_train.csv 등)"
+    )
+
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        default="preprocessed",
+        help="전처리 결과를 저장할 폴더"
+    )
+
+    parser.add_argument(
+        "--skip-test",
+        action="store_true",
+        help="Test 전처리를 건너뜁니다"
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    input_dir = Path(args.input_dir)
+    save_dir = Path(args.save_dir)
+
+    print("입력 폴더:", input_dir.resolve())
+    print("저장 폴더:", save_dir.resolve())
+
+    # 원본 파일이 --input-dir 에 없고 content 하위에 있는 경우를 자동 처리
+    if not (input_dir / "ldaps_train.csv").exists():
+        candidate = input_dir / "content"
+
+        if (candidate / "ldaps_train.csv").exists():
+            print(
+                "ldaps_train.csv를 입력 폴더에서 찾지 못해 "
+                f"'{candidate}' 를 사용합니다."
+            )
+            input_dir = candidate
+        else:
+            raise FileNotFoundError(
+                "ldaps_train.csv를 찾을 수 없습니다. "
+                f"확인한 경로: {(input_dir / 'ldaps_train.csv').resolve()}, "
+                f"{(candidate / 'ldaps_train.csv').resolve()}\n"
+                "--input-dir 로 원본 CSV가 있는 폴더를 지정하세요."
+            )
+
     results = run_preprocessing(
-        input_dir="/content",
-        save_dir="/content/preprocessed",
-        process_test_if_available=True
+        input_dir=input_dir,
+        save_dir=save_dir,
+        process_test_if_available=not args.skip_test
     )
 
-    # 최종 Train: 기상 피처 + 해당 그룹 Target만 포함
-    train_group1 = (
-        results["train"]["group1"]
-    )
+    return results
 
-    train_group2 = (
-        results["train"]["group2"]
-    )
 
-    train_group3 = (
-        results["train"]["group3"]
-    )
-
-    # 진단용 시간별 장기정지 요약
-    # 최종 그룹별 모델 파일에는 포함되지 않음
-    hourly_outage_summary = (
-        results[
-            "hourly_outage_summary"
-        ]
-    )
-
-    if "test" in results:
-        test_group1 = (
-            results["test"]["group1"]
-        )
-
-        test_group2 = (
-            results["test"]["group2"]
-        )
-
-        test_group3 = (
-            results["test"]["group3"]
-        )
+if __name__ == "__main__":
+    main()

@@ -22,3 +22,6 @@ venv/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+#model folder
+**/wind_2stage_residual_output/

@@ -22,3 +22,28 @@ venv/
 # Operating system files
 .DS_Store
 Thumbs.db
+# 원본 데이터
+content/
+
+# 전처리 결과
+preprocessed/
+
+# 모델 학습 및 예측 결과
+output/
+
+# 저장된 학습 모델
+models/
+
+# Jupyter 임시 파일
+.ipynb_checkpoints/
+
+# Python 임시 파일
+__pycache__/
+*.py[cod]
+
+# 환경변수
+.env
+
+# 운영체제 임시 파일
+.DS_Store
+Thumbs.db

@@ -22,28 +22,19 @@ venv/
 # Operating system files
 .DS_Store
 Thumbs.db
-# 원본 데이터
-content/
 
-# 전처리 결과
-preprocessed/
+# 김은호 모델 2 실행 산출물
+/wind_baram_v2_preprocessed/
+/wind_baram_v2_output/
+/wind_hybrid_2stage_output/
+/wind_optimal_group_selector_output/
+/wind_g2_gaussian_moe_output/
+/model_2_output/
 
-# 모델 학습 및 예측 결과
-output/
-
-# 저장된 학습 모델
-models/
+# 저장소 루트에 생성되는 전처리·학습·예측 산출물
+/preprocessed/
+/output/
+/models/
 
 # Jupyter 임시 파일
 .ipynb_checkpoints/
-
-# Python 임시 파일
-__pycache__/
-*.py[cod]
-
-# 환경변수
-.env
-
-# 운영체제 임시 파일
-.DS_Store
-Thumbs.db

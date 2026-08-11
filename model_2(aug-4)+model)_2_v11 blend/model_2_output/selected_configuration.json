@@ -1,0 +1,112 @@
+{
+  "1": {
+    "approved": true,
+    "source": "optimal_selector_group1",
+    "details": {
+      "source": "approved_recent_ensemble",
+      "current_share": 1.0,
+      "recency_weight": 1.5,
+      "expert_share": 0.25
+    }
+  },
+  "2": {
+    "approved": true,
+    "source": "symmetric_gaussian_moe",
+    "details": {
+      "source": "approved_gaussian_moe",
+      "seed": 42,
+      "fast_mode": false,
+      "params": {
+        "centers": [
+          0.18868952038038064,
+          0.3706498187559814,
+          0.623235214554174,
+          0.8736624716030762
+        ],
+        "sigmas": [
+          0.08283596664186019,
+          0.1055462576136108,
+          0.15232875488797357,
+          0.12660008555422142
+        ],
+        "amplitudes": [
+          0.5902948984936087,
+          1.084541726620372,
+          0.6812367346303314,
+          0.8895031613265154
+        ],
+        "base_alpha": 0.5451514140437637,
+        "damping": 3.0,
+        "cap": 0.07
+      },
+      "Q3": {
+        "rows": 1068,
+        "MAE_kWh": 2271.088753925607,
+        "NMAE": 0.10514299786692624,
+        "one_minus_NMAE": 0.8948570021330737,
+        "FICR": 0.485316342343602,
+        "Score": 0.6900866722383379,
+        "within_6_rate": 0.41198501872659177,
+        "within_8_rate": 0.5149812734082397,
+        "signed_bias_cf": 0.02556871993527519
+      },
+      "Q4": {
+        "rows": 1329,
+        "MAE_kWh": 2328.620452801545,
+        "NMAE": 0.10780650244451598,
+        "one_minus_NMAE": 0.892193497555484,
+        "FICR": 0.4474971112385437,
+        "Score": 0.6698453043970138,
+        "within_6_rate": 0.3671933784800602,
+        "within_8_rate": 0.48683220466516175,
+        "signed_bias_cf": 0.002357001660384206
+      },
+      "rescued": 45,
+      "lost": 40,
+      "monthly_wins": 5,
+      "monthly_gain": [
+        [
+          7,
+          0.010262685696559526
+        ],
+        [
+          8,
+          -0.0021186791340320754
+        ],
+        [
+          9,
+          0.004169006433152989
+        ],
+        [
+          10,
+          0.00498371706587708
+        ],
+        [
+          11,
+          0.009601495561540552
+        ],
+        [
+          12,
+          0.007884938308020284
+        ]
+      ]
+    }
+  },
+  "3": {
+    "approved": true,
+    "source": "optimal_selector_group3",
+    "details": {
+      "source": "approved_scoped_high_gate",
+      "current_share": 0.0,
+      "recency_weight": 1.0,
+      "new_base_share": 0.0,
+      "alpha": 0.65,
+      "gate_cutoff": 0.25,
+      "base_min": 0.65,
+      "gamma": 0.3,
+      "cap": 0.1,
+      "rescued": 10,
+      "lost": 7
+    }
+  }
+}

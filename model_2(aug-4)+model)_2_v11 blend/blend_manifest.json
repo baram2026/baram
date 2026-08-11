@@ -1,0 +1,25 @@
+{
+  "purpose": "2025-similarity-NMAE stable cross-quarter blend",
+  "sources": {
+    "aug4_original_submission": "C:\\jupyter project\\wind_final_groupwise_best_output\\submission_final_groupwise_best.csv",
+    "aug4_sha256": "808c88cc463cc2a7f4bc5d5de4f8650887a3fd641c3224b90952f0e0dc4492da",
+    "v11_final_submission": "C:\\jupyter project\\wind_output\\model_2_fast_v11_yearforward\\submission.csv",
+    "v11_sha256": "a5bb6b0e657f4a3206bf6bc6e974a8baf5e5a1978aa1f2e96dd72b6067faea6c"
+  },
+  "weights": {
+    "group1": {
+      "aug4": 0.35,
+      "v11": 0.65
+    },
+    "group2": {
+      "aug4": 0.8,
+      "v11": 0.2
+    },
+    "group3": {
+      "aug4": 1.0,
+      "v11": 0.0
+    }
+  },
+  "important": "Final predictions use the original Aug-4 submission, not restored validation predictions. Restored validation was used only to estimate blend weights.",
+  "rows": 8760
+}

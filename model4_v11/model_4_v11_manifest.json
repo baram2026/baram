@@ -1,0 +1,659 @@
+{
+  "model": "model_4_v11",
+  "config": {
+    "model_name": "model_4_v11",
+    "mode": "fast",
+    "seed": 42,
+    "max_tree_features": 190,
+    "weather_features": 48,
+    "lgb_trees": 3000,
+    "cat_trees": 2500,
+    "pooled_cat_trees": 2500,
+    "expert_trees": 2500,
+    "correction_trees": 1800,
+    "blend_trials": 1200,
+    "direct_lstm_radius": 8,
+    "direct_lstm_units": 56,
+    "direct_lstm_epochs": 16,
+    "direct_lstm_batch": 224,
+    "selection_min_gain": 0.0001,
+    "audit_min_gain": 0.0001,
+    "audit_quarter_tolerance": 0.0,
+    "save_models": false,
+    "enable_raw_candidates": true,
+    "enable_quantile_candidates": true,
+    "dynamic_moe_centers": true,
+    "weather_probability_router": true,
+    "continuous_base_optimization": true,
+    "joint_band_optimization": true,
+    "band_targeted_experts": true,
+    "band_targeted_lstm": true,
+    "separated_tune_validation": true,
+    "tree_early_stopping": true,
+    "early_stopping_fraction": 0.15,
+    "early_stopping_rounds": 150,
+    "final_iteration_multiplier": 1.1,
+    "simultaneous_base_blending": true,
+    "strict_base_validation": true,
+    "train_only_accepted_final": true,
+    "active_only_regression": true,
+    "expanded_base_candidates": true,
+    "use_all_numeric_base_features": true,
+    "add_physical_wind_aggregates": true,
+    "base_quantiles": [
+      0.55,
+      0.58,
+      0.6,
+      0.65
+    ],
+    "weather_emphasis_strengths": [
+      0.75,
+      1.25
+    ],
+    "base_blend_metric": "official_score",
+    "base_blend_use_weather_weights": false,
+    "output_band_base_blending": true,
+    "ensemble_output_band_router": true,
+    "strict_output_band_audit": true,
+    "preserve_individually_audited_bands": true,
+    "band_audit_require_quarters": true,
+    "band_audit_require_global_gain": true,
+    "band_rollback_to_preselected_best_single": true,
+    "joint_global_output_band_objective": true,
+    "audit_band_fallback_against_global": true,
+    "band_audit_global_scope_only": true,
+    "include_aug4_style_anchors": true,
+    "blend_tuning_and_heldout_recipes": true,
+    "enable_raw_xgb_candidate": false,
+    "diversified_base_parameters": true,
+    "rare_weight_exponent": 0.9,
+    "rare_weight_min": 0.35,
+    "rare_weight_max": 4.0,
+    "weather_density_min": 0.25,
+    "weather_density_max": 4.0,
+    "weather_weight_min": 0.3,
+    "weather_weight_max": 3.5,
+    "distribution_aware_base_objective": true,
+    "low_overprediction_lambda": 1.8,
+    "ultra_underprediction_lambda": 2.25,
+    "distribution_contraction_lambda": 1.35,
+    "stage_selection_metric": "official_score",
+    "stage_score_use_weather_weights": false
+  },
+  "preprocessed_dir": "C:\\jupyter project\\wind_output\\lstm_turbine_feature_fast_v3\\preprocessed",
+  "validation": "2022->2023 selection (G3 2023H1->H2); strict component-by-component 2024 rollback",
+  "selection_metric": "distribution-aware base objective; official Score for later stages",
+  "accepted": {
+    "1": {
+      "base_recipe": {
+        "guided_hurdle": 1.0
+      },
+      "base_band_recipes": {
+        "low": {
+          "guided_hurdle": 1.0
+        },
+        "mid": {
+          "guided_hurdle": 1.0
+        },
+        "high": {
+          "raw_lgb_q65": 1.0
+        },
+        "ultra": {
+          "raw_lgb_q65": 1.0
+        }
+      },
+      "base_band_router_weights": {
+        "base_prediction": 0.99,
+        "base_model::raw_lgb_q60": 0.01
+      },
+      "direct_lstm_bands": [
+        {
+          "band": 0,
+          "center": 0.12,
+          "sigma": 0.1,
+          "alpha": 0.7,
+          "enabled": false,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.0048413753282707805
+        },
+        {
+          "band": 1,
+          "center": 0.35,
+          "sigma": 0.24,
+          "alpha": 0.35,
+          "enabled": true,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.008723954588828131
+        },
+        {
+          "band": 2,
+          "center": 0.76,
+          "sigma": 0.24,
+          "alpha": 0.08,
+          "enabled": false,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.0002487156344190833
+        },
+        {
+          "band": 3,
+          "center": 0.82,
+          "sigma": 0.24,
+          "alpha": 0.5,
+          "enabled": true,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.05120785066336553
+        }
+      ],
+      "gaussian_moe_bands": [
+        {
+          "band": 0,
+          "training_center": 0.2,
+          "training_sigma": 0.1,
+          "router_center": 0.12,
+          "router_sigma": 0.14,
+          "alpha": 0.7,
+          "probability_mix": 0.0,
+          "enabled": true,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.0069842409144570405
+        },
+        {
+          "band": 1,
+          "training_center": 0.44999999999999996,
+          "training_sigma": 0.15,
+          "router_center": 0.35,
+          "router_sigma": 0.14,
+          "alpha": 0.08,
+          "probability_mix": 0.0,
+          "enabled": true,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.0013557467145224322
+        },
+        {
+          "band": 2,
+          "training_center": 0.7,
+          "training_sigma": 0.1,
+          "router_center": 0.76,
+          "router_sigma": 0.14,
+          "alpha": 0.04,
+          "probability_mix": 0.5,
+          "enabled": true,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.0009064848676892945
+        },
+        {
+          "band": 3,
+          "training_center": 0.9250000005000001,
+          "training_sigma": 0.125,
+          "router_center": 0.82,
+          "router_sigma": 0.14,
+          "alpha": 0.35,
+          "probability_mix": 1.0,
+          "enabled": true,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.010856769106580955
+        }
+      ]
+    },
+    "2": {
+      "base_recipe": {
+        "guided_hurdle": 1.0
+      },
+      "base_band_recipes": {
+        "low": {
+          "guided_hurdle": 1.0
+        },
+        "mid": {
+          "guided_hurdle": 1.0
+        },
+        "high": {
+          "raw_lgb_q65": 1.0
+        },
+        "ultra": {
+          "raw_lgb_q65": 1.0
+        }
+      },
+      "base_band_router_weights": {
+        "base_prediction": 0.997533820093761,
+        "base_model::aug4_g3_style_anchor": 0.0024661799062390037
+      },
+      "direct_lstm_bands": [
+        {
+          "band": 0,
+          "center": 0.12,
+          "sigma": 0.14,
+          "alpha": 0.7,
+          "enabled": true,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.012671550067684834
+        },
+        {
+          "band": 1,
+          "center": 0.52,
+          "sigma": 0.24,
+          "alpha": 0.04,
+          "enabled": true,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.0020351047833746527
+        },
+        {
+          "band": 2,
+          "center": 0.6,
+          "sigma": 0.06,
+          "alpha": 0.7,
+          "enabled": false,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.0031056091258051532
+        },
+        {
+          "band": 3,
+          "center": 0.82,
+          "sigma": 0.06,
+          "alpha": 0.35,
+          "enabled": true,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.003308972434273305
+        }
+      ],
+      "gaussian_moe_bands": [
+        {
+          "band": 0,
+          "training_center": 0.2,
+          "training_sigma": 0.1,
+          "router_center": 0.18,
+          "router_sigma": 0.08,
+          "alpha": 0.7,
+          "probability_mix": 0.0,
+          "enabled": true,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.0020698196584894024
+        },
+        {
+          "band": 1,
+          "training_center": 0.44999999999999996,
+          "training_sigma": 0.15,
+          "router_center": 0.35,
+          "router_sigma": 0.2,
+          "alpha": 0.08,
+          "probability_mix": 0.0,
+          "enabled": true,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.0011451050648895178
+        },
+        {
+          "band": 2,
+          "training_center": 0.7,
+          "training_sigma": 0.1,
+          "router_center": 0.6,
+          "router_sigma": 0.08,
+          "alpha": 0.7,
+          "probability_mix": 0.0,
+          "enabled": true,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.004308419265981911
+        },
+        {
+          "band": 3,
+          "training_center": 0.9250000005000001,
+          "training_sigma": 0.125,
+          "router_center": 0.98,
+          "router_sigma": 0.14,
+          "alpha": 0.7,
+          "probability_mix": 0.5,
+          "enabled": false,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.002498398474684027
+        }
+      ]
+    },
+    "3": {
+      "base_recipe": {
+        "pooled_cat_base": 1.0
+      },
+      "base_band_recipes": {
+        "low": {
+          "guided_hurdle": 1.0
+        },
+        "mid": {
+          "pooled_cat_base": 1.0
+        },
+        "high": {
+          "pooled_cat_base": 1.0
+        },
+        "ultra": {
+          "pooled_cat_base": 1.0
+        }
+      },
+      "base_band_router_weights": {
+        "base_prediction": 0.13,
+        "base_model::pooled_cat_base": 0.8700000000000001
+      },
+      "direct_lstm_bands": [
+        {
+          "band": 0,
+          "center": 0.12,
+          "sigma": 0.18,
+          "alpha": 0.5,
+          "enabled": true,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.010900237002335778
+        },
+        {
+          "band": 1,
+          "center": 0.35,
+          "sigma": 0.14,
+          "alpha": 0.04,
+          "enabled": false,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.0018617668765822382
+        },
+        {
+          "band": 2,
+          "center": 0.76,
+          "sigma": 0.24,
+          "alpha": 0.2,
+          "enabled": true,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.005544049764871106
+        },
+        {
+          "band": 3,
+          "center": 0.9,
+          "sigma": 0.24,
+          "alpha": 0.02,
+          "enabled": true,
+          "kind": "direct_lstm_joint",
+          "selection_gain": 0.0004863762659812476
+        }
+      ],
+      "gaussian_moe_bands": [
+        {
+          "band": 0,
+          "training_center": 0.2,
+          "training_sigma": 0.1,
+          "router_center": 0.18,
+          "router_sigma": 0.08,
+          "alpha": 0.7,
+          "probability_mix": 0.0,
+          "enabled": false,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.007839341276782763
+        },
+        {
+          "band": 1,
+          "training_center": 0.44999999999999996,
+          "training_sigma": 0.15,
+          "router_center": 0.43,
+          "router_sigma": 0.08,
+          "alpha": 0.5,
+          "probability_mix": 0.0,
+          "enabled": false,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.00490946919005486
+        },
+        {
+          "band": 2,
+          "training_center": 0.7,
+          "training_sigma": 0.1,
+          "router_center": 0.6,
+          "router_sigma": 0.08,
+          "alpha": 0.12,
+          "probability_mix": 0.5,
+          "enabled": false,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.0013757276895479675
+        },
+        {
+          "band": 3,
+          "training_center": 0.9,
+          "training_sigma": 0.1,
+          "router_center": 0.9,
+          "router_sigma": 0.12,
+          "alpha": 0.0,
+          "probability_mix": 0.0,
+          "enabled": false,
+          "kind": "gaussian_moe_joint",
+          "selection_gain": 0.0
+        }
+      ]
+    }
+  },
+  "correction_configs": {
+    "event": {
+      "1": {
+        "enabled": false,
+        "group_weight": 0,
+        "under_threshold": 0.65,
+        "over_threshold": 0.75,
+        "max_width": 0.35,
+        "conflict_margin": 0.05,
+        "selection_gain": 0.013359548474396021
+      },
+      "2": {
+        "enabled": false,
+        "group_weight": 0,
+        "under_threshold": 0.65,
+        "over_threshold": 0.75,
+        "max_width": 0.35,
+        "conflict_margin": 0.15,
+        "selection_gain": 0.009539148194977254
+      },
+      "3": {
+        "enabled": false,
+        "group_weight": 0.5,
+        "under_threshold": 0.85,
+        "over_threshold": 0.75,
+        "max_width": 0.35,
+        "conflict_margin": 0.15,
+        "selection_gain": 0.0007982498640142222
+      }
+    },
+    "residual": {
+      "1": {
+        "enabled": false,
+        "group_weight": 0,
+        "under_threshold": 0.45,
+        "over_threshold": 0.75,
+        "shrink": 1.0,
+        "conflict_margin": 0.1,
+        "event_margin": 0.05,
+        "selection_gain": 0.006254512122205846
+      },
+      "2": {
+        "enabled": false,
+        "group_weight": 0.75,
+        "under_threshold": 0.45,
+        "over_threshold": 0.75,
+        "shrink": 0.75,
+        "conflict_margin": 0.05,
+        "event_margin": 0.05,
+        "selection_gain": 0.0020631015781890083
+      },
+      "3": {
+        "enabled": false,
+        "group_weight": 0,
+        "under_threshold": 0.45,
+        "over_threshold": 0.75,
+        "shrink": 1.0,
+        "conflict_margin": 0.1,
+        "event_margin": 0.05,
+        "selection_gain": 0.0050200662255524
+      }
+    },
+    "lower": {
+      "1": {
+        "enabled": true,
+        "group_weight": 0,
+        "ambiguous_threshold": 0.6,
+        "high_threshold": 0.8,
+        "max_base": 0.18,
+        "high_probability_floor": 0.16,
+        "ambiguous_floor": 0.18,
+        "selection_gain": 0.001413764640361137
+      },
+      "2": {
+        "enabled": true,
+        "group_weight": 0,
+        "ambiguous_threshold": 0.6,
+        "high_threshold": 0.8,
+        "max_base": 0.18,
+        "high_probability_floor": 0.16,
+        "ambiguous_floor": 0.18,
+        "selection_gain": 0.0005624138796702649
+      },
+      "3": {
+        "enabled": true,
+        "group_weight": 0.25,
+        "ambiguous_threshold": 0.7,
+        "high_threshold": 0.9,
+        "max_base": 0.18,
+        "high_probability_floor": 0.16,
+        "ambiguous_floor": 0.18,
+        "selection_gain": 0.0011715784971049192
+      }
+    }
+  },
+  "tree_iterations": {
+    "cat/pooled": 248,
+    "lgb/pooled_l2": 285,
+    "lgb/pooled_output_band": 160,
+    "lgb/G1/raw": 555,
+    "cat/G1/raw": 210,
+    "lgb/G1/raw_l2": 157,
+    "lgb/G1/raw_huber": 170,
+    "cat/G1/q55": 289,
+    "lgb/G1/high_weight": 181,
+    "lgb/G1/q55": 254,
+    "lgb/G1/q58": 256,
+    "lgb/G1/q60": 336,
+    "lgb/G1/q65": 233,
+    "lgb/G1/rare": 374,
+    "cat/G1/rare": 274,
+    "lgb/G1/active_probability": 104,
+    "lgb/G1/gfs_only_lgb_l2": 344,
+    "lgb/G1/ldaps_only_lgb_l2": 277,
+    "lgb/G1/nwp_no_lstm_lgb_l2": 279,
+    "lgb/G1/weather_consensus_lgb_l2": 298,
+    "lgb/G1/weather_s75": 522,
+    "lgb/G1/weather_s125": 608,
+    "lgb/G1/output_band": 113,
+    "cat/G1/output_band": 133,
+    "lgb/G1/high_probability_60": 204,
+    "lgb/G1/high_probability_80": 88,
+    "lgb/G1/expert_band0": 97,
+    "lgb/G1/expert_band1": 38,
+    "lgb/G1/expert_band2": 24,
+    "lgb/G1/expert_band3": 29,
+    "lgb/G2/raw": 516,
+    "cat/G2/raw": 1261,
+    "lgb/G2/raw_l2": 85,
+    "lgb/G2/raw_huber": 84,
+    "cat/G2/q55": 1185,
+    "lgb/G2/high_weight": 234,
+    "lgb/G2/q55": 665,
+    "lgb/G2/q58": 726,
+    "lgb/G2/q60": 1066,
+    "lgb/G2/q65": 372,
+    "lgb/G2/rare": 1044,
+    "cat/G2/rare": 134,
+    "lgb/G2/active_probability": 116,
+    "lgb/G2/gfs_only_lgb_l2": 420,
+    "lgb/G2/ldaps_only_lgb_l2": 89,
+    "lgb/G2/nwp_no_lstm_lgb_l2": 527,
+    "lgb/G2/weather_consensus_lgb_l2": 200,
+    "lgb/G2/weather_s75": 657,
+    "lgb/G2/weather_s125": 211,
+    "lgb/G2/output_band": 95,
+    "cat/G2/output_band": 120,
+    "lgb/G2/high_probability_60": 59,
+    "lgb/G2/high_probability_80": 118,
+    "lgb/G2/expert_band0": 47,
+    "lgb/G2/expert_band1": 3,
+    "lgb/G2/expert_band2": 18,
+    "lgb/G2/expert_band3": 15,
+    "lgb/G3/raw": 284,
+    "cat/G3/raw": 492,
+    "lgb/G3/raw_l2": 185,
+    "lgb/G3/raw_huber": 209,
+    "cat/G3/q55": 239,
+    "lgb/G3/high_weight": 211,
+    "lgb/G3/q55": 220,
+    "lgb/G3/q58": 208,
+    "lgb/G3/q60": 151,
+    "lgb/G3/q65": 144,
+    "lgb/G3/rare": 225,
+    "cat/G3/rare": 199,
+    "lgb/G3/active_probability": 275,
+    "lgb/G3/gfs_only_lgb_l2": 216,
+    "lgb/G3/ldaps_only_lgb_l2": 202,
+    "lgb/G3/nwp_no_lstm_lgb_l2": 148,
+    "lgb/G3/weather_consensus_lgb_l2": 272,
+    "lgb/G3/weather_s75": 578,
+    "lgb/G3/weather_s125": 327,
+    "lgb/G3/output_band": 99,
+    "cat/G3/output_band": 175,
+    "lgb/G3/high_probability_60": 176,
+    "lgb/G3/high_probability_80": 67,
+    "lgb/G3/expert_band0": 98,
+    "lgb/G3/expert_band1": 1,
+    "lgb/G3/expert_band2": 8,
+    "lgb/G3/expert_band3": 1,
+    "lgb/correction/event/G1/under": 587,
+    "lgb/correction/event/G1/over": 713,
+    "lgb/correction/event/G2/under": 516,
+    "lgb/correction/event/G2/over": 725,
+    "lgb/correction/event/G3/under": 149,
+    "lgb/correction/event/G3/over": 1,
+    "lgb/correction/event/pooled/under": 1482,
+    "lgb/correction/event/pooled/over": 783,
+    "lgb/correction/residual/G1/under": 1126,
+    "lgb/correction/residual/G1/over": 212,
+    "lgb/correction/residual/G1/magnitude": 146,
+    "lgb/correction/residual/G2/under": 1209,
+    "lgb/correction/residual/G2/over": 176,
+    "lgb/correction/residual/G2/magnitude": 82,
+    "lgb/correction/residual/G3/under": 111,
+    "lgb/correction/residual/G3/over": 247,
+    "lgb/correction/residual/G3/magnitude": 110,
+    "lgb/correction/residual/pooled/under": 1798,
+    "lgb/correction/residual/pooled/over": 1180,
+    "lgb/correction/residual/pooled/magnitude": 534,
+    "lgb/correction/lower/G1/low": 144,
+    "lgb/correction/lower/G2/low": 150,
+    "lgb/correction/lower/G3/low": 190,
+    "lgb/correction/lower/pooled/low": 933,
+    "final/cat/pooled": 273,
+    "final/lgb/pooled_output_band": 176,
+    "final/lgb/G1/raw": 611,
+    "final/lgb/G1/q60": 370,
+    "final/lgb/G1/q65": 257,
+    "final/lgb/G1/active_probability": 115,
+    "final/lgb/G1/output_band": 125,
+    "final/cat/G1/output_band": 147,
+    "final/lgb/G1/high_probability_60": 225,
+    "final/lgb/G1/high_probability_80": 97,
+    "final/lgb/G1/expert_band0": 107,
+    "final/lgb/G1/expert_band1": 50,
+    "final/lgb/G1/expert_band2": 50,
+    "final/lgb/G1/expert_band3": 50,
+    "final/lgb/G2/raw": 568,
+    "final/cat/G2/q55": 1304,
+    "final/lgb/G2/q65": 410,
+    "final/lgb/G2/active_probability": 128,
+    "final/lgb/G2/output_band": 105,
+    "final/cat/G2/output_band": 132,
+    "final/lgb/G2/expert_band0": 52,
+    "final/lgb/G2/expert_band1": 50,
+    "final/lgb/G2/expert_band2": 50,
+    "final/lgb/G3/raw": 313,
+    "final/lgb/G3/active_probability": 303,
+    "final/lgb/G3/output_band": 109,
+    "final/cat/G3/output_band": 193,
+    "final/lgb/correction/lower/G1/low": 159,
+    "final/lgb/correction/lower/G2/low": 165,
+    "final/lgb/correction/lower/G3/low": 210,
+    "final/lgb/correction/lower/pooled/low": 1027
+  },
+  "runtime_minutes": 82.48398521833344,
+  "estimated_runtime": "1.5-2.5 hours fast; 5-9 hours full"
+}
